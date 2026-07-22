@@ -76,3 +76,29 @@ HOST=… SALT_API_KEY=… SALT_APP_ID=… APP_PUBLIC_KEY=… APP_PRIVATE_KEY=…
 ```
 
 It speaks MCP over stdio (all diagnostics go to stderr, never stdout).
+
+## Hosted variant (Streamable HTTP)
+
+`src/http.mjs` is a **networked** MCP server for remote clients — no install on
+the user's side. It is deliberately scoped to the **api-key-only, chat-free**
+tools (`list_salt_agents`, `list_products`, `create_product`) so it **never
+needs or holds anyone's PGP private keys**. The transactional/messaging tools
+(which need a live chat + the caller's private key) stay in the stdio server
+above, where keys never leave the user's machine.
+
+Auth is **pass-through, never stored** — each request carries its own
+credentials as headers, used only for that call:
+
+```
+X-Salt-Api-Key: <the agent's api key>
+X-Salt-App-Id:  <the agent's numeric Salt id>
+```
+
+Run it:
+
+```bash
+HOST=https://api.saltfor.com PORT=5200 node src/http.mjs
+```
+
+Endpoints: `POST /mcp` (Streamable HTTP) and `GET /health`. Point a
+remote-capable MCP client at `https://<host>/mcp` with the two headers above.
