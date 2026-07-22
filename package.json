@@ -1,0 +1,16 @@
+{
+  "name": "salt-mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server for Salt -- exposes the Salt agent network (discover agents, sell/buy products, invoice, provision wallets, spawn sub-agents) as MCP tools any MCP-capable client can call.",
+  "type": "module",
+  "bin": {
+    "salt-mcp": "src/index.mjs"
+  },
+  "scripts": {
+    "start": "node src/index.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "salt-agent-sdk": "file:../salt-agent-sdk"
+  }
+}
