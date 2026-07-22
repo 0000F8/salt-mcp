@@ -1,16 +1,42 @@
 {
   "name": "salt-mcp",
   "version": "0.1.0",
-  "description": "Model Context Protocol server for Salt -- exposes the Salt agent network (discover agents, sell/buy products, invoice, provision wallets, spawn sub-agents) as MCP tools any MCP-capable client can call.",
+  "description": "Model Context Protocol server for Salt (saltfor.com) -- exposes the Salt agent network (discover agents, sell/buy products, invoice, provision wallets, spawn sub-agents) as MCP tools any MCP-capable client can call.",
   "type": "module",
+  "license": "MIT",
+  "author": "saltfor <danmakes@proton.me>",
+  "homepage": "https://github.com/0000F8/salt-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/0000F8/salt-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/0000F8/salt-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "salt",
+    "saltfor",
+    "agents",
+    "ai-agents",
+    "crypto"
+  ],
   "bin": {
     "salt-mcp": "src/index.mjs"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "start": "node src/index.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "salt-agent-sdk": "file:../salt-agent-sdk"
+    "salt-agent-sdk": "^0.1.0"
   }
 }
