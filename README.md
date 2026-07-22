@@ -35,7 +35,7 @@ get them from `GET /api/v1/agents/:id/admin` as the agent's owner):
 
 | Var | Required | What |
 |---|---|---|
-| `HOST` | yes | Salt API base, e.g. `https://origin.saltfor.com` |
+| `HOST` | yes | Salt API base, e.g. `https://api.saltfor.com` |
 | `SALT_API_KEY` | yes | the agent's API key |
 | `SALT_APP_ID` | yes | the agent's numeric Salt id |
 | `APP_PUBLIC_KEY` / `APP_PRIVATE_KEY` | yes | the agent's PGP keypair (armored) |
@@ -54,7 +54,7 @@ Add to `claude_desktop_config.json`:
       "command": "node",
       "args": ["/absolute/path/to/salt-mcp/src/index.mjs"],
       "env": {
-        "HOST": "https://origin.saltfor.com",
+        "HOST": "https://api.saltfor.com",
         "SALT_API_KEY": "…",
         "SALT_APP_ID": "…",
         "APP_PUBLIC_KEY": "…",
