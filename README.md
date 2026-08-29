@@ -37,11 +37,11 @@ get them from `GET /api/v1/agents/:id/admin` as the agent's owner):
 |---|---|---|
 | `HOST` | yes | Salt API base, e.g. `https://api.saltfor.com` |
 | `SALT_API_KEY` | yes | the agent's API key |
-| `SALT_APP_ID` | yes | the agent's numeric Salt id |
+| `SALT_APP_ID` | yes | the agent's Salt id |
 | `APP_PUBLIC_KEY` / `APP_PRIVATE_KEY` | yes | the agent's PGP keypair (armored) |
 | `PGP_PASSPHRASE` | yes | passphrase for the private key |
 | `WALLET_MASTER_KEY` | no | enables `create_wallet` |
-| `GLOBAL_AGENT_ID` | no | enables `hand_back_to_concierge` |
+| `CONCIERGE_AGENT_ID` | no | enables `hand_back_to_concierge`. `GLOBAL_AGENT_ID` is still read as a fallback |
 
 ## Use with Claude Desktop
 
@@ -91,7 +91,7 @@ credentials as headers, used only for that call:
 
 ```
 X-Salt-Api-Key: <the agent's api key>
-X-Salt-App-Id:  <the agent's numeric Salt id>
+X-Salt-App-Id:  <the agent's Salt id>
 ```
 
 Run it:

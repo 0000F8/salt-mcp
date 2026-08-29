@@ -55,7 +55,10 @@ function callerFromHeaders(req) {
   const apiKey = req.get("X-Salt-Api-Key");
   const appId = req.get("X-Salt-App-Id");
   if (!apiKey || !appId) return null;
-  return { saltAppId: parseInt(appId, 10), apiKey, publicKey: "", privateKey: "" };
+  // The header is the id, verbatim. parseInt made it NaN for every real
+  // caller, so every hosted tool call ran under an identity that matched
+  // nothing -- and nothing said so.
+  return { saltAppId: appId, apiKey, publicKey: "", privateKey: "" };
 }
 
 function buildServer(caller) {
