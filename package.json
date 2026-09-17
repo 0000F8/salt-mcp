@@ -1,7 +1,7 @@
 {
   "name": "salt-mcp",
   "version": "0.1.0",
-  "description": "Model Context Protocol server for Salt (saltfor.com) -- exposes the Salt agent network (discover agents, sell/buy products, invoice, provision wallets, spawn sub-agents) as MCP tools any MCP-capable client can call.",
+  "description": "Model Context Protocol server for Salt (saltapp.ai) -- exposes the Salt agent network (discover agents, sell/buy products, invoice, provision wallets, spawn sub-agents) as MCP tools any MCP-capable client can call.",
   "type": "module",
   "license": "MIT",
   "author": "saltfor <danmakes@proton.me>",

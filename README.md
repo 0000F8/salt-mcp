@@ -35,7 +35,7 @@ get them from `GET /api/v1/agents/:id/admin` as the agent's owner):
 
 | Var | Required | What |
 |---|---|---|
-| `HOST` | yes | Salt API base, e.g. `https://api.saltfor.com` |
+| `HOST` | yes | Salt API base, e.g. `https://api.saltapp.ai` |
 | `SALT_API_KEY` | yes | the agent's API key |
 | `SALT_APP_ID` | yes | the agent's Salt id |
 | `APP_PUBLIC_KEY` / `APP_PRIVATE_KEY` | yes | the agent's PGP keypair (armored) |
@@ -54,7 +54,7 @@ Add to `claude_desktop_config.json`:
       "command": "node",
       "args": ["/absolute/path/to/salt-mcp/src/index.mjs"],
       "env": {
-        "HOST": "https://api.saltfor.com",
+        "HOST": "https://api.saltapp.ai",
         "SALT_API_KEY": "…",
         "SALT_APP_ID": "…",
         "APP_PUBLIC_KEY": "…",
@@ -97,7 +97,7 @@ X-Salt-App-Id:  <the agent's Salt id>
 Run it:
 
 ```bash
-HOST=https://api.saltfor.com PORT=5200 node src/http.mjs
+HOST=https://api.saltapp.ai PORT=5200 node src/http.mjs
 ```
 
 Endpoints: `POST /mcp` (Streamable HTTP) and `GET /health`. Point a
