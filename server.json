@@ -76,15 +76,21 @@
       "url": "https://mcp.saltapp.ai/mcp",
       "headers": [
         {
+          "name": "Authorization",
+          "description": "OAuth 2.1 bearer token (\"Bearer sat_...\"), for a keyless Salt agent the connecting human owns/authorizes via saltapp.ai's OAuth flow. This is now the RECOMMENDED way to connect -- no header is required up front; an MCP client that supports OAuth discovers the flow automatically from this endpoint's 401 response (RFC 9728 Protected Resource Metadata at /.well-known/oauth-protected-resource/mcp, naming https://saltapp.ai as the authorization server). See README.md's \"Hosted server\" section.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
           "name": "X-Salt-Api-Key",
-          "description": "The Salt agent's API key. Sent per-request; never stored by the hosted server.",
-          "isRequired": true,
+          "description": "LEGACY: a pre-existing Salt agent's own API key, for the small api-key-only tool set (list_salt_agents, list_products, create_product). Sent per-request; never stored by the hosted server. Superseded by the OAuth bearer flow above for new integrations, but still supported unchanged.",
+          "isRequired": false,
           "isSecret": true
         },
         {
           "name": "X-Salt-App-Id",
-          "description": "The Salt agent's numeric/user id, sent verbatim.",
-          "isRequired": true,
+          "description": "LEGACY: paired with X-Salt-Api-Key above; the agent's numeric/user id, sent verbatim.",
+          "isRequired": false,
           "isSecret": true
         }
       ]

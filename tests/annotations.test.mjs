@@ -4,12 +4,20 @@
 // builds the REAL action catalog straight from the installed salt-agent-sdk
 // (not a hand-copied list), so a new SDK action fails this test the moment
 // it lands here, before anyone ships it unannotated.
+//
+// Extended for the K5 OAuth lane's keyless toolset (src/keyless-tools.mjs)
+// below -- those tools are NOT salt-agent-sdk actions (see that module's
+// header comment for why they live in a separate map), so they get their
+// own lightweight annotation-coverage check here rather than being folded
+// into TOOL_ANNOTATIONS itself. Deeper behavioral coverage for them lives
+// in tests/keyless-tools.test.mjs.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import pkg from "salt-agent-sdk";
 import { TOOL_ANNOTATIONS, annotationsFor, toMcpTools } from "../src/annotations.mjs";
 import { HOSTED_TOOLS } from "../src/http.mjs";
+import { KEYLESS_TOOLS, toKeylessMcpTools } from "../src/keyless-tools.mjs";
 
 const { createSaltClient, createIdentityStore, createActions } = pkg;
 
@@ -118,5 +126,42 @@ test("the hosted HTTP server only exposes api-key-only, chat-free tools, and the
   for (const name of HOSTED_TOOLS) {
     assert.ok(liveNames.has(name), `HOSTED_TOOLS names a tool the SDK doesn't define: ${name}`);
     assert.ok(TOOL_ANNOTATIONS[name], `hosted tool "${name}" has no annotation entry`);
+  }
+});
+
+// --- keyless (OAuth) toolset: same coverage bar, own map ------------------
+
+test("every keyless tool (K5 OAuth toolset) carries a title and all four MCP annotation hints", () => {
+  assert.ok(KEYLESS_TOOLS.length > 0);
+  for (const tool of KEYLESS_TOOLS) {
+    assert.equal(typeof tool.title, "string");
+    assert.ok(tool.title.length > 0, `${tool.name} needs a title`);
+    for (const field of HINT_FIELDS) {
+      assert.equal(typeof tool.annotations[field], "boolean", `${tool.name}.${field}`);
+    }
+  }
+});
+
+test("toKeylessMcpTools() attaches annotations to every keyless tool, alongside name/description/inputSchema", () => {
+  const tools = toKeylessMcpTools();
+  assert.equal(tools.length, KEYLESS_TOOLS.length);
+  for (const tool of tools) {
+    assert.equal(typeof tool.name, "string");
+    assert.equal(typeof tool.description, "string");
+    assert.equal(typeof tool.inputSchema, "object");
+    assert.ok(tool.annotations, `${tool.name} is missing annotations`);
+    for (const field of HINT_FIELDS) {
+      assert.equal(typeof tool.annotations[field], "boolean", `${tool.name}.annotations.${field}`);
+    }
+  }
+});
+
+test("no keyless tool name collides with a legacy HOSTED_TOOLS name of a different shape", () => {
+  // list_salt_agents/list_products/create_product legitimately exist in
+  // BOTH catalogs (same name, different backing implementation per auth
+  // path -- see src/http.mjs) -- that overlap is intentional. This just
+  // guards that the keyless catalog didn't accidentally drop one of them.
+  for (const name of HOSTED_TOOLS) {
+    assert.ok(KEYLESS_TOOLS.some((t) => t.name === name), `keyless toolset dropped ${name}, which HOSTED_TOOLS still expects to exist`);
   }
 });

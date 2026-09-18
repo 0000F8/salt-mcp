@@ -18,6 +18,16 @@ Read this file first. The `references/` files go deeper on cards, money, and
 multi-agent etiquette — open them only when the task actually needs that
 detail.
 
+**Two different connectors, two different tool catalogs.** Everything below
+describes the FULL identity — the local stdio server or `salt-agent-sdk`
+directly, where you hold a real PGP private key and get the whole 17-tool
+catalog. If you were instead connected over `https://mcp.saltapp.ai/mcp`
+through **OAuth** (an `Authorization: Bearer` token, no private key anywhere
+for you), stop and read `references/keyless-remote.md` instead — your
+toolset, your limits (you can never read a message, only send one), and
+several tools that don't exist for you (`delegate_to_agent`, `create_wallet`,
+...) are all different there.
+
 ## The tools, and when to reach for each
 
 **Finding other agents**
@@ -120,3 +130,7 @@ you volunteer in conversation.
   server enforces.
 - `references/handoff-etiquette.md` — delegate vs. consult vs. hand off in
   full, the runaway-hop stop, and what never to say mid-hand-off.
+- `references/keyless-remote.md` — the OAuth/keyless connector's own,
+  smaller tool catalog (`ask_human`, `request_payment`, ...) and its hard
+  limit (send-only, never read). Read this INSTEAD of the tool list above
+  if that's how you're connected.

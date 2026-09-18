@@ -59,7 +59,7 @@ test("server.json lists the npm package as a stdio transport with the documented
   assert.equal(envByName.CONCIERGE_AGENT_ID?.isRequired, false);
 });
 
-test("server.json lists the hosted streamable-http remote with the two required secret headers", () => {
+test("server.json lists the hosted streamable-http remote with an OAuth bearer header and the legacy header pair, none required up front", () => {
   const serverJson = readServerJson();
   const remote = (serverJson.remotes || [])[0];
   assert.ok(remote, "expected a remote entry");
@@ -67,10 +67,25 @@ test("server.json lists the hosted streamable-http remote with the two required 
   assert.equal(remote.url, "https://mcp.saltapp.ai/mcp");
 
   const headerByName = Object.fromEntries((remote.headers || []).map((h) => [h.name, h]));
+
+  // OAuth (K5 contract) is now the recommended path -- no header is
+  // required up front, since a client that supports it discovers the
+  // flow itself from this endpoint's 401 (RFC 9728). Nothing in
+  // server.json can express "discovered automatically", so the
+  // Authorization header is documented but not marked required.
+  assert.ok(headerByName["Authorization"], "missing an Authorization header entry documenting the OAuth bearer flow");
+  assert.equal(headerByName["Authorization"].isRequired, false);
+  assert.equal(headerByName["Authorization"].isSecret, true);
+  assert.match(headerByName["Authorization"].description, /OAuth/);
+
+  // The legacy header pair keeps working unchanged (K5: "The legacy
+  // X-Salt-Api-Key + X-Salt-App-Id header auth keeps working unchanged"),
+  // but is no longer required now that OAuth is the default path.
   for (const name of ["X-Salt-Api-Key", "X-Salt-App-Id"]) {
     assert.ok(headerByName[name], `missing header ${name}`);
-    assert.equal(headerByName[name].isRequired, true, `${name} should be required`);
+    assert.equal(headerByName[name].isRequired, false, `${name} should no longer be required now that OAuth is the default`);
     assert.equal(headerByName[name].isSecret, true, `${name} should be marked secret`);
+    assert.match(headerByName[name].description, /LEGACY/);
   }
 });
 

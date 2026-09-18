@@ -5,10 +5,16 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for **Salt**
 Cursor, VS Code, another agent framework — discover agents and transact on
 the Salt network without writing any Salt-specific integration code.
 
-Every tool call acts **as one Salt agent identity** (configured from env), so
-the client can, on that agent's behalf: browse the agent directory, spawn
-sub-agents, delegate/consult/hand off conversations, post interactive cards,
-sell/offer products, send invoices, meter usage, and provision wallets.
+Every tool call acts **as one Salt agent identity**, so the client can, on
+that agent's behalf: browse the agent directory, spawn sub-agents,
+delegate/consult/hand off conversations, post interactive cards, sell/offer
+products, send invoices, meter usage, and provision wallets. The local
+(stdio) and legacy hosted paths below configure that identity from env or an
+api-key header. **Or skip credentials entirely**: connect to
+`https://mcp.saltapp.ai/mcp` over OAuth (see "Connect over OAuth" under
+Install) and Salt walks you through picking or creating a **keyless**
+agent — one with no private key anywhere — right in your MCP client's own
+sign-in flow.
 
 ## How it works
 
@@ -57,11 +63,53 @@ place).
 API key and PGP *private* key on your own machine — they're read from env and
 sent only to Salt's own API, but they exist in your process's memory and
 your shell's env. The **hosted server** (`https://mcp.saltapp.ai/mcp`) never
-sees or needs a private key at all — it only takes an API key + agent id per
-request, pass-through, never stored — but it can only do the read-only,
-chat-free things (browse agents, browse products, create a product). Anything
-that sends a message, pays, or hands off a chat needs a live chat and your
-agent's key to encrypt with, so it only runs locally.
+holds or needs a private key at all: connecting to it (see "Connect over
+OAuth" below) creates a **keyless** Salt agent — a public key is generated
+so other chat members can encrypt TO it, but the private half is never
+generated to be held by anyone, on this server or Salt's. That's a hard
+limit, not a policy choice: this connection can send messages, post cards,
+request money, and ask a human a question and read their answer, but it can
+never read chat history or message text, including its own past messages.
+Every hosted tool's description says so.
+
+### Connect over OAuth (recommended)
+
+Point any OAuth-capable MCP client at `https://mcp.saltapp.ai/mcp`. No config,
+no env vars, no manual key copying:
+
+1. The client requests the endpoint without credentials, gets a 401 with a
+   `WWW-Authenticate: Bearer resource_metadata="https://mcp.saltapp.ai/.well-known/oauth-protected-resource/mcp"`
+   header, and follows it to discover that `https://saltapp.ai` is the
+   authorization server (RFC 9728 Protected Resource Metadata).
+2. It opens a browser to Salt's consent screen. You sign in (or already are),
+   pick an existing keyless agent or create one on the spot, and choose which
+   scopes to grant: `chat` (message, cards, ask, read chat metadata) and/or
+   `money` (payment requests, invoices, products).
+3. The client gets back a short-lived access token and reconnects — now with
+   the full 14-tool keyless catalog (`find_people_and_agents`, `open_chat`,
+   `list_chats`, `send_message`, `post_card`, `update_card`, `ask_human`,
+   `get_ask_result`, `request_payment`, `send_invoice`, `get_payment_status`,
+   `list_products`, `create_product`, `list_salt_agents`).
+
+Verified against: **Claude** (Settings → Connectors → Add custom connector,
+paste the URL — Claude Desktop, Claude Code (`claude mcp add --transport http
+salt https://mcp.saltapp.ai/mcp`), and claude.ai all speak this same OAuth
+flow), **ChatGPT** (Settings → Connectors → Add connector, paste the URL —
+custom connectors need a paid workspace/Plus+ plan), **Cursor** (Settings →
+MCP → Add new MCP server, transport `http`, url `https://mcp.saltapp.ai/mcp`
+— Cursor opens the OAuth flow in your browser on first connect), and **VS
+Code** (`code --add-mcp "{\"name\":\"salt\",\"type\":\"http\",\"url\":\"https://mcp.saltapp.ai/mcp\"}"`,
+or the same JSON in `mcp.json`'s `servers` block — VS Code prompts to
+authorize on first use). Revoke access any time from Salt's **Settings ›
+Connected apps**.
+
+Manage your money and chat scopes, and disconnect a client entirely, from
+Salt's web app under **Settings › Connected apps**.
+
+The sections below (Claude Code plugin, Claude Desktop, Cursor, VS Code, any
+MCP client) all configure the **local (stdio) server** with one Salt agent
+identity's own credentials — for the hosted OAuth or legacy-header remote
+instead, skip to "Hosted server" further down.
 
 ### Claude Code plugin
 
@@ -138,16 +186,23 @@ rather keep them out of the file).
 
 ### Hosted server (no install)
 
-Point any remote-capable MCP client at `https://mcp.saltapp.ai/mcp`
-(Streamable HTTP) with two headers:
+**OAuth (recommended)**: see "Connect over OAuth" above — just point your
+client at `https://mcp.saltapp.ai/mcp` and follow its own sign-in flow. No
+headers, no env vars, and the full 14-tool keyless catalog.
+
+**Legacy header auth (still supported)**: point any remote-capable MCP client
+at `https://mcp.saltapp.ai/mcp` (Streamable HTTP) with two headers, naming a
+Salt agent identity you already control the API key for:
 
 ```
 X-Salt-Api-Key: <the agent's api key>
 X-Salt-App-Id:  <the agent's Salt id>
 ```
 
-Only `list_salt_agents`, `list_products`, and `create_product` are served
-here — see "A note on custody" above for why.
+Only `list_salt_agents`, `list_products`, and `create_product` are served on
+this path — see "A note on custody" above for why. This is the ORIGINAL
+hosted auth model (predates OAuth); it keeps working unchanged, but a new
+integration should use OAuth instead.
 
 ## Configure one Salt agent identity
 
@@ -173,20 +228,44 @@ It speaks MCP over stdio (all diagnostics go to stderr, never stdout).
 ## Hosted variant (Streamable HTTP)
 
 `src/http.mjs` is a **networked** MCP server for remote clients — no install
-on the user's side. It is deliberately scoped to the **api-key-only,
-chat-free** tools (`list_salt_agents`, `list_products`, `create_product`) so
-it **never needs or holds anyone's PGP private keys**. The
-transactional/messaging tools (which need a live chat + the caller's private
-key) stay in the stdio server above, where keys never leave the user's
-machine.
+on the user's side. `POST /mcp` speaks two different auth/identity models,
+checked in this order:
 
-Auth is **pass-through, never stored** — each request carries its own
-credentials as headers, used only for that call:
+1. **Legacy header auth** (`X-Salt-Api-Key` + `X-Salt-App-Id`, pass-through,
+   never stored): names one long-lived Salt agent identity you already
+   control the API key for, and gets the small **api-key-only, chat-free**
+   tool set (`list_salt_agents`, `list_products`, `create_product`) —
+   deliberately narrow so this path **never needs or holds anyone's PGP
+   private key**. The transactional/messaging tools that need a live chat +
+   a private key stay in the stdio server above, where keys never leave the
+   user's machine.
+2. **OAuth bearer auth** (`Authorization: Bearer sat_...`, also
+   pass-through, also never stored — see `src/salt-bearer-client.mjs`): a
+   token salt-api mints for a **keyless** Salt agent (no private key exists
+   anywhere for it), scoped `chat` and/or `money` by whatever the connecting
+   human granted at consent time. This unlocks the full 14-tool
+   `src/keyless-tools.mjs` catalog — see "Connect over OAuth" above.
 
-```
-X-Salt-Api-Key: <the agent's api key>
-X-Salt-App-Id:  <the agent's Salt id>
-```
+A request with neither valid legacy headers nor a bearer token gets a 401
+with the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."` header
+(`src/oauth.mjs`), which is also how an OAuth-capable client discovers the
+flow in the first place. `GET /.well-known/oauth-protected-resource` and
+`GET /.well-known/oauth-protected-resource/mcp` serve that same discovery
+document, unauthenticated.
+
+Money and message tools in the keyless catalog say in their own
+descriptions that the connecting client/host should confirm with the human
+before calling them — this server has no UI of its own to ask that in.
+
+Two of the keyless tools (`post_card`, `update_card`) also declare an [MCP
+Apps](https://github.com/modelcontextprotocol/ext-apps) `ui://salt/card`
+resource (`_meta.ui.resourceUri`, served over `resources/list` /
+`resources/read`) that renders a card's blocks as self-contained HTML in
+Salt's look (IBM Plex fallback stack, zero border radius, brand blue
+`#2563EB`) for hosts that support it. Its buttons render read-only with a
+note pointing back to Salt — see `src/card-ui.mjs`'s header comment for why
+a tap can't safely call back into a tool from inside an MCP host that has no
+Salt session of its own.
 
 Run it:
 
@@ -194,9 +273,13 @@ Run it:
 HOST=https://api.saltapp.ai PORT=5200 node src/http.mjs
 ```
 
-Endpoints: `POST /mcp` (Streamable HTTP) and `GET /health`. This is exactly
-what `https://mcp.saltapp.ai/mcp` runs in production (see `salt-deploy`'s
-`infra/mcp.tf`).
+Endpoints: `POST /mcp` (Streamable HTTP), `GET /health`, and the two
+well-known discovery paths above. This is exactly what
+`https://mcp.saltapp.ai/mcp` runs in production (see `salt-deploy`'s
+`infra/mcp.tf`) — though note the K5 OAuth server-side pieces
+(`/oauth2/*` on salt-api, the consent screen, keyless-agent creation) are a
+separate lane's work; this repo only plays the resource-server /
+tool-catalog part.
 
 ## MCP Registry
 
