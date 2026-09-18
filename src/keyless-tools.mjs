@@ -143,6 +143,28 @@ function decodeAskId(askId) {
 const ASK_HUMAN_MAX_MS = 50_000;
 const GET_ASK_RESULT_MAX_MS = 2_000;
 
+// The floor on how often an EMPTY poll may repeat, even if salt-api
+// answers instantly (2026-09-19 availability review, N2). K2's own "Short
+// poll" contract has salt-api wait up to ~2s server-side when there's
+// nothing new, which normally paces this loop for free -- but nothing
+// stops a fast/cached/misbehaving response from coming back with
+// `updates: []` in a few milliseconds, and without a floor of our own
+// this loop would then spin as fast as the network round-trip allows,
+// hammering salt-api far harder than the K2 contract's own pacing
+// intends. Only applies when a poll comes back with NO updates at all
+// (not just none matching this card) -- any real updates are a sign of
+// real activity, worth checking again for promptly.
+const MIN_EMPTY_POLL_MS = 1_000;
+
+/** Interruptible sleep -- resolves early (never rejects) if `signal` aborts mid-wait. */
+function sleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener?.("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
 /**
  * Short-polls the socket-mode outbox (K2 contract,
  * GET /api/v1/agent/updates) for a card_interaction on `cardId`, up to
@@ -152,18 +174,33 @@ const GET_ASK_RESULT_MAX_MS = 2_000;
  * AbortSignal) stops the loop early -- wired in src/http.mjs to the
  * underlying HTTP request's own `res.on("close")`, so a client that hangs
  * up mid-ask_human doesn't leave this server polling salt-api for up to
- * another 50s on its behalf. Each call to `rest.agentUpdates` is itself
- * expected to pace (the real server waits up to ~2s when there's nothing
- * new -- see K2's "Short poll" contract), so this loop adds no artificial
- * sleep of its own; the wall-clock deadline (and the signal) are what
- * bound it either way.
+ * another 50s on its behalf.
+ *
+ * Two pacing guards, both from the 2026-09-19 availability review: an
+ * empty poll (no updates at all) is followed by a sleep long enough to
+ * make that iteration take at least `minEmptyPollMs` in total (see
+ * MIN_EMPTY_POLL_MS's comment for why); a 429 from `rest.agentUpdates`
+ * (this server's OWN per-IP limiter, or salt-api's) is honoured via
+ * `err.retryAfterSeconds` (see SaltBearerApiError/salt-bearer-client.mjs)
+ * rather than being retried immediately or treated as fatal.
  */
-export async function pollForCardInteraction(rest, bearerToken, { cardId, after = 0, maxTotalMs, signal }) {
+export async function pollForCardInteraction(rest, bearerToken, { cardId, after = 0, maxTotalMs, signal, minEmptyPollMs = MIN_EMPTY_POLL_MS }) {
   const deadline = Date.now() + maxTotalMs;
   let cursor = after;
   do {
     if (signal?.aborted) return { found: false, cursor };
-    const response = await rest.agentUpdates(bearerToken, { after: cursor, timeoutSeconds: 2, limit: 50, signal });
+    const startedAt = Date.now();
+    let response;
+    try {
+      response = await rest.agentUpdates(bearerToken, { after: cursor, timeoutSeconds: 2, limit: 50, signal });
+    } catch (err) {
+      if (err instanceof SaltBearerApiError && err.status === 429) {
+        const retryAfterMs = Math.max(1, Number(err.retryAfterSeconds) || 1) * 1000;
+        await sleep(retryAfterMs, signal);
+        continue;
+      }
+      throw err;
+    }
     const updates = Array.isArray(response?.updates) ? response.updates : [];
     for (const update of updates) {
       if (update.event !== "card_interaction") continue;
@@ -178,6 +215,10 @@ export async function pollForCardInteraction(rest, bearerToken, { cardId, after 
       }
     }
     if (response && response.cursor !== undefined) cursor = response.cursor;
+    if (updates.length === 0) {
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < minEmptyPollMs) await sleep(minEmptyPollMs - elapsed, signal);
+    }
   } while (Date.now() < deadline && !signal?.aborted);
   return { found: false, cursor };
 }
@@ -317,6 +358,7 @@ async function askHuman(rest, bearerToken, input, ctx) {
     after: 0,
     maxTotalMs: ctx?.maxTotalMsOverride ?? ASK_HUMAN_MAX_MS,
     signal: ctx?.signal,
+    minEmptyPollMs: ctx?.minEmptyPollMsOverride ?? MIN_EMPTY_POLL_MS,
   });
   const askId = encodeAskId({ cardId, chatId, humanId: human.id, actionMap, cursor: poll.cursor ?? 0 });
   if (!poll.found) return { status: "pending", ask_id: askId };
@@ -333,6 +375,7 @@ async function getAskResult(rest, bearerToken, input, ctx) {
     after: state.cursor ?? 0,
     maxTotalMs: ctx?.maxTotalMsOverride ?? GET_ASK_RESULT_MAX_MS,
     signal: ctx?.signal,
+    minEmptyPollMs: ctx?.minEmptyPollMsOverride ?? MIN_EMPTY_POLL_MS,
   });
   const nextAskId = encodeAskId({ ...state, cursor: poll.cursor ?? state.cursor ?? 0 });
   if (!poll.found) return { status: "pending", ask_id: nextAskId };
@@ -784,19 +827,20 @@ export function toKeylessMcpTools(tools = KEYLESS_TOOLS) {
  * signal; request_payment/send_invoice/create_product for the grant's
  * wallets). Every other tool ignores its 4th argument.
  *
- * `maxTotalMsOverride` is ONLY for tests calling this function directly --
- * src/http.mjs (the one real caller reachable from the wire) never passes
- * it, so no MCP client can ever set ask_human's/get_ask_result's polling
- * budget. Fixing this at exactly this boundary (an options object only
- * server-side code populates) rather than reading it off `args` is the
- * point: see keyless-tools.mjs's `_maxTotalMs` history in git log for the
- * bug this replaced.
+ * `maxTotalMsOverride`/`minEmptyPollMsOverride` are ONLY for tests calling
+ * this function directly -- src/http.mjs (the one real caller reachable
+ * from the wire) never passes either, so no MCP client can ever set
+ * ask_human's/get_ask_result's polling budget or pacing floor. Fixing
+ * this at exactly this boundary (an options object only server-side code
+ * populates) rather than reading it off `args` is the point: see
+ * keyless-tools.mjs's `_maxTotalMs` history in git log for the bug this
+ * replaced.
  */
-export async function runKeylessTool(name, args, { rest, bearerToken, signal, grant, maxTotalMsOverride }) {
+export async function runKeylessTool(name, args, { rest, bearerToken, signal, grant, maxTotalMsOverride, minEmptyPollMsOverride }) {
   const tool = KEYLESS_TOOLS.find((t) => t.name === name);
   if (!tool) throw new Error(`Tool "${name}" is not available on this connection.`);
   try {
-    return await tool.execute(rest, bearerToken, args ?? {}, { signal, grant, maxTotalMsOverride });
+    return await tool.execute(rest, bearerToken, args ?? {}, { signal, grant, maxTotalMsOverride, minEmptyPollMsOverride });
   } catch (err) {
     if (err instanceof SaltBearerApiError && err.status === 403) {
       throw new Error(SCOPE_REFUSAL_MESSAGE[tool.scope] || SCOPE_REFUSAL_MESSAGE[SCOPES.CHAT]);

@@ -27,14 +27,15 @@ function fakeSaltApi(routes, calls) {
   return async (url, init = {}) => {
     const { pathname, search } = new URL(url);
     const method = (init.method || "GET").toUpperCase();
-    if (calls) calls.push({ method, pathname, search, authHeader: init.headers?.Authorization ?? init.headers?.authorization });
+    const headers = init.headers || {};
+    if (calls) calls.push({ method, pathname, search, authHeader: headers.Authorization ?? headers.authorization, headers });
     const key = `${method} ${pathname}`;
     const handler = routes[key] ?? routes[`${method} ${pathname}${search}`];
     if (!handler) {
       return new Response(JSON.stringify({ error: `no mock route for ${key}${search}` }), { status: 404 });
     }
-    const authHeader = init.headers?.Authorization ?? init.headers?.authorization;
-    return handler({ pathname, search, authHeader, body: init.body ? JSON.parse(init.body) : undefined });
+    const authHeader = headers.Authorization ?? headers.authorization;
+    return handler({ pathname, search, authHeader, headers, body: init.body ? JSON.parse(init.body) : undefined });
   };
 }
 
@@ -362,6 +363,149 @@ test("GET /health reports ok without any credentials", async () => {
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.equal(body.status, "ok");
+  } finally {
+    server.close();
+  }
+});
+
+// --- availability (2026-09-19 review, N2): per-IP rate limiting -----------
+
+test("a per-IP flood is refused with 429 + Retry-After before token validation ever runs", async () => {
+  const calls = [];
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: fakeSaltApi({}, calls),
+    rateLimitOptions: { limit: 2, windowMs: 60_000 },
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const post = (auth) =>
+      fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: auth },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+
+    const first = await post("Bearer sat_flood_1"); // consumes budget slot 1 (fails validation, but still counts)
+    const second = await post("Bearer sat_flood_2"); // slot 2
+    assert.notEqual(first.status, 429);
+    assert.notEqual(second.status, 429);
+
+    calls.length = 0;
+    const third = await post("Bearer sat_flood_3");
+    assert.equal(third.status, 429);
+    assert.ok(Number(third.headers.get("retry-after")) >= 1);
+    assert.deepEqual(calls, [], "a rate-limited request must never reach salt-api at all, not even for token validation");
+  } finally {
+    server.close();
+  }
+});
+
+test("different caller IPs (via X-Forwarded-For) get independent rate-limit budgets", async () => {
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: fakeSaltApi({ "GET /api/v1/oauth2/grant": () => json({ error: "nope" }, 401) }),
+    rateLimitOptions: { limit: 1, windowMs: 60_000 },
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const post = (ip) =>
+      fetch(`${baseUrl}/mcp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Forwarded-For": ip, Authorization: "Bearer sat_x" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+    const first = await post("203.0.113.7");
+    const second = await post("203.0.113.7");
+    const third = await post("198.51.100.9"); // a different caller IP -- its own budget
+    assert.notEqual(first.status, 429);
+    assert.equal(second.status, 429, "the same IP's second request within the window is rate-limited");
+    assert.notEqual(third.status, 429, "a different IP is unaffected by the first IP's budget");
+  } finally {
+    server.close();
+  }
+});
+
+// --- availability (N2): edge secret + real caller IP on outbound calls ----
+
+test("EDGE_SECRET set: every outbound salt-api call carries X-Salt-Edge and the real caller's IP, derived from X-Forwarded-For's first hop", async () => {
+  const calls = [];
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: fakeSaltApi(grantRoute(), calls),
+    env: { EDGE_SECRET: "top-secret-edge" },
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer sat_edge_test",
+        // CloudFront's own forwarded value, then the ALB's own appended hop.
+        "X-Forwarded-For": "203.0.113.7, 15.197.140.10",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    assert.ok(calls.length >= 1);
+    for (const call of calls) {
+      assert.equal(call.headers["X-Salt-Edge"], "top-secret-edge");
+      assert.equal(call.headers["CloudFront-Viewer-Address"], "203.0.113.7:0");
+      assert.equal(call.headers["X-Forwarded-For"], "203.0.113.7");
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("EDGE_SECRET unset (local dev): outbound salt-api calls carry neither the edge secret nor the viewer-IP headers", async () => {
+  const calls = [];
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: fakeSaltApi(grantRoute(), calls),
+    env: {}, // explicitly no EDGE_SECRET
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer sat_local_dev", "X-Forwarded-For": "203.0.113.7" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    assert.ok(calls.length >= 1);
+    for (const call of calls) {
+      assert.equal("X-Salt-Edge" in call.headers, false);
+      assert.equal("CloudFront-Viewer-Address" in call.headers, false);
+      // The client's own X-Forwarded-For is never forwarded onward as-is
+      // either when EDGE_SECRET is unset -- salt-api sees nothing at all
+      // about a viewer IP that this task can't vouch for with the secret.
+      assert.equal("X-Forwarded-For" in call.headers, false);
+    }
+  } finally {
+    server.close();
+  }
+});
+
+test("edge headers reach salt-api on the LEGACY header-auth path too, not just the OAuth path", async () => {
+  const calls = [];
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: fakeSaltApi({ "GET /api/v1/agents": () => json([]) }, calls),
+    env: { EDGE_SECRET: "top-secret-edge" },
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const client = new Client({ name: "test-legacy-edge-client", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { "X-Salt-Api-Key": "legacy-key", "X-Salt-App-Id": "legacy-app-1", "X-Forwarded-For": "203.0.113.7" } },
+    });
+    await client.connect(transport);
+    await client.callTool({ name: "list_salt_agents", arguments: {} });
+    assert.ok(calls.length >= 1);
+    const agentsCall = calls.find((c) => c.pathname === "/api/v1/agents");
+    assert.equal(agentsCall.headers["X-Salt-Edge"], "top-secret-edge");
+    assert.equal(agentsCall.headers["CloudFront-Viewer-Address"], "203.0.113.7:0");
+    await client.close();
   } finally {
     server.close();
   }

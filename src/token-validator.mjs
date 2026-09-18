@@ -20,28 +20,71 @@
 // The cache is keyed by a SHA-256 DIGEST of the token, never the raw
 // token -- so a heap snapshot or an accidental log of this process's
 // memory never hands over a live, still-valid access token, the way
-// caching by the raw token itself would.
+// caching by the raw token itself would. Negative results (an invalid
+// token) are cached for the SAME ttl -- a flood retrying one dead token
+// doesn't re-ask salt-api every time either.
+//
+// 2026-09-19 availability review (N2): this cache is now a bounded LRU
+// (default 10,000 entries) rather than an unbounded Map -- a flood of
+// distinct garbage tokens used to be able to grow this cache without
+// limit, one entry per unique garbage string, forever. `rest` moved from
+// a constructor option to a per-call argument: the underlying fetch it
+// makes carries THIS request's edge headers (src/edge-headers.mjs), which
+// are per-caller-IP, so baking one `rest` in at construction time would
+// have reported whichever caller happened to trigger the first cache miss
+// as the source of every later one too.
 
 import { createHash } from "node:crypto";
 import { SaltBearerApiError } from "./salt-bearer-client.mjs";
+
+const DEFAULT_MAX_ENTRIES = 10_000;
 
 function digestFor(token) {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
 /**
- * @param {{rest: object, ttlMs?: number, now?: () => number}} options
+ * @param {{ttlMs?: number, maxEntries?: number, now?: () => number}} options
  */
-export function createTokenValidator({ rest, ttlMs = 30_000, now = Date.now }) {
+export function createTokenValidator({ ttlMs = 30_000, maxEntries = DEFAULT_MAX_ENTRIES, now = Date.now } = {}) {
+  // Map iteration order is insertion order, which is exactly what an LRU
+  // needs: `get` re-inserts a hit at the end (most-recently-used), `set`
+  // evicts from the front (least-recently-used) once over maxEntries.
   const cache = new Map(); // digest -> { result, expiresAt }
 
+  function readCache(key) {
+    const cached = cache.get(key);
+    if (!cached) return undefined;
+    if (cached.expiresAt <= now()) {
+      cache.delete(key);
+      return undefined;
+    }
+    // Touch: move to the end so this entry looks recently-used.
+    cache.delete(key);
+    cache.set(key, cached);
+    return cached.result;
+  }
+
+  function writeCache(key, result) {
+    cache.delete(key); // re-insert at the end even on an update
+    cache.set(key, { result, expiresAt: now() + ttlMs });
+    while (cache.size > maxEntries) {
+      const oldestKey = cache.keys().next().value;
+      cache.delete(oldestKey);
+    }
+  }
+
   /**
+   * @param {string} token
+   * @param {{rest: object}} options the REST client scoped to the
+   *   CURRENT request's edge headers (see src/edge-headers.mjs) -- used
+   *   only on a cache miss.
    * @returns {Promise<{valid: true, scopes: string[], wallets: object[]} | {valid: false}>}
    */
-  async function validate(token) {
+  async function validate(token, { rest }) {
     const key = digestFor(token);
-    const cached = cache.get(key);
-    if (cached && cached.expiresAt > now()) return cached.result;
+    const cached = readCache(key);
+    if (cached) return cached;
 
     let result;
     try {
@@ -59,9 +102,9 @@ export function createTokenValidator({ rest, ttlMs = 30_000, now = Date.now }) {
         throw err;
       }
     }
-    cache.set(key, { result, expiresAt: now() + ttlMs });
+    writeCache(key, result);
     return result;
   }
 
-  return { validate };
+  return { validate, size: () => cache.size };
 }

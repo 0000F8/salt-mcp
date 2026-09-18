@@ -29,8 +29,16 @@
 // its own Salt credentials and they're used only for that request's tool
 // call(s).
 //
+// AVAILABILITY (2026-09-19 review, N2): every request to /mcp is rate
+// limited per caller IP BEFORE any auth-specific work happens (including
+// token validation itself), and every outbound call this server makes to
+// salt-api -- legacy or keyless -- carries this task's edge secret and
+// the real caller's IP, relayed the same way CloudFront's own viewer-IP
+// headers work. See src/rate-limiter.mjs and src/edge-headers.mjs.
+//
 // Env: HOST (Salt API base), PORT (default 5200), MCP_RESOURCE_URL,
-// MCP_ISSUER (OAuth config overrides, see src/oauth.mjs).
+// MCP_ISSUER (OAuth config overrides, see src/oauth.mjs), EDGE_SECRET
+// (see src/edge-headers.mjs; unset in local dev).
 
 import { readFileSync } from "node:fs";
 import express from "express";
@@ -50,6 +58,9 @@ import { KEYLESS_TOOLS, toKeylessMcpTools, runKeylessTool } from "./keyless-tool
 import { CARD_UI_RESOURCE_URI, CARD_UI_MIME_TYPE, renderCardAppHtml } from "./card-ui.mjs";
 import { createTokenValidator } from "./token-validator.mjs";
 import { validateAgainstSchema } from "./validate-input.mjs";
+import { createRateLimiter } from "./rate-limiter.mjs";
+import { buildEdgeHeaders, withEdgeHeaders } from "./edge-headers.mjs";
+import { callerIpFromRequest } from "./caller-ip.mjs";
 
 // Every access token this resource server issues starts with `sat_` (the
 // K5 contract's own naming). A bearer that doesn't -- most dangerously, a
@@ -95,24 +106,48 @@ export function callerFromHeaders(req) {
  * `fetchImpl` and drive it with real HTTP on an ephemeral port instead of
  * stubbing Express itself.
  *
- * @param {{host?: string, fetchImpl?: typeof fetch, oauthConfig?: object}} options
+ * @param {{
+ *   host?: string, fetchImpl?: typeof fetch, oauthConfig?: object,
+ *   env?: NodeJS.ProcessEnv,
+ *   rateLimiter?: {check: (ip: string) => {allowed: boolean, retryAfterSeconds?: number}},
+ *   rateLimitOptions?: {limit?: number, windowMs?: number, now?: () => number},
+ * }} options
  */
-export function createApp({ host, fetchImpl, oauthConfig } = {}) {
+export function createApp({ host, fetchImpl, oauthConfig, env, rateLimiter, rateLimitOptions } = {}) {
   const HOST = (host ?? process.env.HOST ?? "").replace(/\/$/, "");
   if (!HOST) throw new Error("HOST is required");
   const config = oauthConfig ?? loadOAuthConfig();
+  const baseFetch = fetchImpl ?? fetch;
+  const requestEnv = env ?? process.env;
+
+  // Stops an obvious flood -- including one made entirely of garbage
+  // bearer tokens -- before it costs this server anything beyond a Map
+  // lookup, and before token validation ever spends a call on salt-api.
+  // Shared across every request to this app instance (per-IP counters
+  // must persist to mean anything); see src/rate-limiter.mjs.
+  const limiter = rateLimiter ?? createRateLimiter(rateLimitOptions ?? {});
 
   // --- legacy header-auth path: unchanged from the pre-OAuth server ------
-  const legacyClient = createSaltClient({ host: HOST, fetchImpl });
-  const legacyActions = createActions({
-    client: legacyClient,
+  // Tool metadata (names/schemas) never depends on which client executes
+  // a call, so this one throwaway build (base fetch, never actually used
+  // to call salt-api) is enough for tools/list and the /health count.
+  // Real execution below builds a FRESH client per request, wrapped with
+  // that request's own edge headers.
+  const hostedDefinitions = createActions({
+    client: createSaltClient({ host: HOST, fetchImpl: baseFetch }),
     identities: createIdentityStore(),
     pgpPassphrase: "unused-on-hosted",
     publicWebhookUrl: "",
-  });
-  const hostedDefinitions = legacyActions.definitions.filter((d) => HOSTED_TOOLS.has(d.name));
+  }).definitions.filter((d) => HOSTED_TOOLS.has(d.name));
 
-  function buildLegacyServer(caller) {
+  function buildLegacyServer(caller, edgeHeaders) {
+    const scopedFetch = withEdgeHeaders(baseFetch, edgeHeaders);
+    const legacyActions = createActions({
+      client: createSaltClient({ host: HOST, fetchImpl: scopedFetch }),
+      identities: createIdentityStore(),
+      pgpPassphrase: "unused-on-hosted",
+      publicWebhookUrl: "",
+    });
     const server = new Server({ name: "salt-mcp-hosted", version: PACKAGE_VERSION }, { capabilities: { tools: {} } });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: toMcpTools(hostedDefinitions),
@@ -133,14 +168,15 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
     return server;
   }
 
-  // --- OAuth bearer path: the keyless toolset -----------------------------
-  const rest = createSaltBearerClient({ host: HOST, fetchImpl });
   // Validates a bearer against salt-api (GET /api/v1/oauth2/grant) once
-  // per request, cached ~30s by token digest -- see token-validator.mjs's
-  // header comment for why this exists at all (an unchecked bearer used
-  // to sail straight through to tools/list and tools/call) and why the
-  // cache key is a digest, never the raw token.
-  const tokenValidator = createTokenValidator({ rest });
+  // per request, cached ~30s (bounded LRU) by token digest -- see
+  // token-validator.mjs's header comment for why this exists at all (an
+  // unchecked bearer used to sail straight through to tools/list and
+  // tools/call) and why the cache key is a digest, never the raw token.
+  // Built once (the cache must persist across requests); the `rest`
+  // client a cache MISS actually calls is passed in per-call below,
+  // scoped to THAT request's edge headers.
+  const tokenValidator = createTokenValidator({});
 
   // `requestCtx` carries the AbortSignal for this HTTP request (so
   // ask_human/get_ask_result stop polling salt-api the moment the client
@@ -148,7 +184,7 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
   // grant this token validated to (so money tools spend a wallet the
   // human actually attached to it, never a re-fetch, never a wallet of
   // the agent's own -- it has none).
-  function buildKeylessServer(bearerToken, requestCtx) {
+  function buildKeylessServer(bearerToken, rest, requestCtx) {
     const server = new Server(
       { name: "salt-mcp-keyless", version: PACKAGE_VERSION },
       { capabilities: { tools: {}, resources: {} } }
@@ -208,6 +244,18 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
   // keeps callers fully isolated -- no shared session state, nothing to
   // leak between clients.
   app.post("/mcp", async (req, res) => {
+    // Rate limit FIRST -- ahead of legacy/bearer branching, ahead of
+    // token validation, ahead of everything. See src/rate-limiter.mjs's
+    // header comment for why this sits here specifically.
+    const callerIp = callerIpFromRequest(req) || "unknown";
+    const rateCheck = limiter.check(callerIp);
+    if (!rateCheck.allowed) {
+      return res
+        .status(429)
+        .set("Retry-After", String(rateCheck.retryAfterSeconds))
+        .json({ jsonrpc: "2.0", error: { code: -32004, message: "Too many requests. Slow down and retry later." }, id: null });
+    }
+
     const legacyCaller = callerFromHeaders(req);
 
     // Stops any in-flight ask_human/get_ask_result poll (see
@@ -218,9 +266,15 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
     const controller = new AbortController();
     res.on("close", () => controller.abort());
 
+    // Every outbound call THIS request makes to salt-api -- legacy or
+    // keyless, including the token-validation call below -- carries this
+    // task's edge secret and this caller's real IP (empty when
+    // EDGE_SECRET is unset, e.g. local dev; see src/edge-headers.mjs).
+    const edgeHeaders = buildEdgeHeaders(req, requestEnv);
+
     let server;
     if (legacyCaller) {
-      server = buildLegacyServer(legacyCaller);
+      server = buildLegacyServer(legacyCaller, edgeHeaders);
     } else {
       const bearerToken = extractBearerToken(req.get("Authorization"));
       if (!bearerToken) {
@@ -232,9 +286,10 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
       if (!bearerToken.startsWith(ACCESS_TOKEN_PREFIX)) {
         return sendInvalidToken(res, config);
       }
+      const rest = createSaltBearerClient({ host: HOST, fetchImpl: withEdgeHeaders(baseFetch, edgeHeaders) });
       let validation;
       try {
-        validation = await tokenValidator.validate(bearerToken);
+        validation = await tokenValidator.validate(bearerToken, { rest });
       } catch {
         // salt-api itself is unreachable/erroring -- not the same claim
         // as "this token is bad", so this is a 502, not a 401 (and the
@@ -248,7 +303,7 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
       if (!validation.valid) {
         return sendInvalidToken(res, config);
       }
-      server = buildKeylessServer(bearerToken, { signal: controller.signal, grant: validation });
+      server = buildKeylessServer(bearerToken, rest, { signal: controller.signal, grant: validation });
     }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { transport.close(); server.close(); });

@@ -24,14 +24,22 @@
 // independent layer (refusing anything that isn't a bare UUID/integer
 // BEFORE it ever reaches here) -- belt and suspenders, not either/or.
 
-/** Mirrors salt-agent-sdk's SaltApiError shape (status + body + one-sentence message). */
+/**
+ * Mirrors salt-agent-sdk's SaltApiError shape (status + body + one-sentence
+ * message). `retryAfterSeconds` (2026-09-19 availability review, N2) carries
+ * a 429 response's `Retry-After` header when present, so a caller -- right
+ * now, keyless-tools.mjs's pollForCardInteraction -- can back off for
+ * exactly as long as asked instead of retrying immediately or treating a
+ * rate limit as a fatal error.
+ */
 export class SaltBearerApiError extends Error {
-  constructor(method, path, status, body) {
+  constructor(method, path, status, body, retryAfterSeconds) {
     const reason = body && typeof body === "object" && typeof body.error === "string" ? `: ${body.error}` : "";
     super(`Salt API ${method} ${path} -> ${status}${reason}`);
     this.name = "SaltBearerApiError";
     this.status = status;
     this.body = body;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -61,7 +69,11 @@ export function createSaltBearerClient({ host, fetchImpl }) {
         parsed = text;
       }
     }
-    if (!res.ok) throw new SaltBearerApiError(method, path, res.status, parsed);
+    if (!res.ok) {
+      const retryAfterHeader = res.headers?.get?.("Retry-After") ?? res.headers?.get?.("retry-after");
+      const retryAfterSeconds = retryAfterHeader != null ? Number(retryAfterHeader) : undefined;
+      throw new SaltBearerApiError(method, path, res.status, parsed, Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : undefined);
+    }
     return parsed;
   }
 

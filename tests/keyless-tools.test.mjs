@@ -615,7 +615,7 @@ test("ask_human returns {status: 'pending', ask_id} when nobody has answered wit
   const result = await runKeylessTool(
     "ask_human",
     { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["A", "B"] },
-    { rest, bearerToken: "tok", maxTotalMsOverride: 10 }
+    { rest, bearerToken: "tok", maxTotalMsOverride: 10, minEmptyPollMsOverride: 2 }
   );
   assert.deepEqual(Object.keys(result).sort(), ["ask_id", "status"]);
   assert.equal(result.status, "pending");
@@ -692,6 +692,7 @@ test("get_ask_result resumes from a pending ask_id and resolves once the tap lan
       },
       bearerToken: "tok",
       maxTotalMsOverride: 5,
+      minEmptyPollMsOverride: 2,
     }
   );
   assert.equal(pendingAsk.status, "pending");
@@ -725,6 +726,7 @@ test("get_ask_result's polling budget also cannot be set from tool arguments", a
       },
       bearerToken: "tok",
       maxTotalMsOverride: 5,
+      minEmptyPollMsOverride: 2,
     }
   );
   let pollCount = 0;
@@ -744,7 +746,7 @@ test("get_ask_result's polling budget also cannot be set from tool arguments", a
 test("pollForCardInteraction stops within its wall-clock budget when nothing ever matches", async () => {
   let calls = 0;
   const rest = { async agentUpdates() { calls += 1; return { updates: [], cursor: 0 }; } };
-  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 15 });
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 15, minEmptyPollMs: 2 });
   assert.equal(result.found, false);
   assert.ok(calls >= 1);
 });
@@ -772,4 +774,94 @@ test("pollForCardInteraction stops after the signal aborts mid-poll, without wai
   const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 50_000, signal: controller.signal });
   assert.equal(result.found, false);
   assert.equal(calls, 1, "the loop must not run a second round after the signal aborts");
+});
+
+// --- pacing floor + Retry-After (2026-09-19 availability review, N2) ------
+
+test("an empty poll that returns instantly is still followed by at least minEmptyPollMs before the next round -- salt-api's own pacing is never the only guard", async () => {
+  const calls = [];
+  const rest = {
+    async agentUpdates() {
+      calls.push(Date.now());
+      return { updates: [], cursor: 0 }; // answers instantly, no updates at all
+    },
+  };
+  const start = Date.now();
+  await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 60, minEmptyPollMs: 25 });
+  assert.ok(calls.length >= 2, "the loop ran more than one round within the budget");
+  for (let i = 1; i < calls.length; i++) {
+    assert.ok(calls[i] - calls[i - 1] >= 25, `round ${i} started only ${calls[i] - calls[i - 1]}ms after the previous one`);
+  }
+  assert.ok(Date.now() - start >= 25);
+});
+
+test("a poll that returns REAL updates (even non-matching ones) is not held back by the empty-poll floor", async () => {
+  let calls = 0;
+  const rest = {
+    async agentUpdates() {
+      calls += 1;
+      // Not empty -- there IS an update, it just isn't for our card.
+      return { updates: [{ id: calls, event: "card_interaction", body: JSON.stringify({ card_id: "some-other-card", action_id: "opt_0" }) }], cursor: calls };
+    },
+  };
+  const start = Date.now();
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 40, minEmptyPollMs: 5_000 });
+  assert.equal(result.found, false);
+  assert.ok(calls >= 3, `expected several fast rounds within the 40ms budget, got ${calls}`);
+  assert.ok(Date.now() - start < 5_000, "a 5s empty-poll floor must never apply when the response wasn't actually empty");
+});
+
+test("a 429 from agentUpdates is retried after Retry-After, not treated as fatal and not retried immediately", async () => {
+  const calls = [];
+  const rest = {
+    async agentUpdates() {
+      calls.push(Date.now());
+      if (calls.length === 1) {
+        throw new SaltBearerApiError("GET", "/api/v1/agent/updates", 429, { error: "slow down" }, 1); // retryAfterSeconds: 1
+      }
+      return { updates: [{ id: 9, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }], cursor: 9 };
+    },
+  };
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 5_000 });
+  assert.equal(result.found, true);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1] - calls[0] >= 900, `expected roughly a 1s (retryAfterSeconds=1) wait before retrying, got ${calls[1] - calls[0]}ms`);
+});
+
+test("a 429 with no Retry-After still backs off (defaults to 1s) rather than retrying immediately", async () => {
+  const calls = [];
+  const rest = {
+    async agentUpdates() {
+      calls.push(Date.now());
+      if (calls.length === 1) throw new SaltBearerApiError("GET", "/api/v1/agent/updates", 429, { error: "slow down" }, undefined);
+      // Resolves on the second call so the loop ends there -- this test
+      // is only about the SPACING before that call, not about how many
+      // more empty rounds would otherwise follow.
+      return { updates: [{ id: 1, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }], cursor: 1 };
+    },
+  };
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 5_000 });
+  assert.equal(result.found, true);
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1] - calls[0] >= 900, `expected roughly a 1s default backoff, got ${calls[1] - calls[0]}ms`);
+});
+
+test("an aborted signal cuts a Retry-After wait short instead of waiting it out", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  const rest = {
+    async agentUpdates() {
+      calls += 1;
+      if (calls === 1) {
+        setTimeout(() => controller.abort(), 5);
+        throw new SaltBearerApiError("GET", "/api/v1/agent/updates", 429, {}, 30); // a 30s Retry-After
+      }
+      return { updates: [], cursor: 0 };
+    },
+  };
+  const start = Date.now();
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 60_000, signal: controller.signal });
+  assert.equal(result.found, false);
+  assert.ok(Date.now() - start < 1_000, "the abort must cut the 30s Retry-After wait short, not wait it out");
+  assert.equal(calls, 1, "the loop must not retry after the signal aborts, even mid-backoff");
 });
