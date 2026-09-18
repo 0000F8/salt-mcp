@@ -255,6 +255,17 @@ export function renderCardAppHtml() {
       }
 
       window.addEventListener("message", function (event) {
+        // Only accept a message from the frame that actually embedded us.
+        // A sandboxed iframe with no allow-same-origin has an opaque
+        // origin, and so, typically, does its embedding parent -- so
+        // event.origin is not a reliable check here (per the MCP Apps
+        // messaging model). event.source IS reliable: postMessage always
+        // sets it to the real sending window, regardless of origin, so
+        // comparing it against window.parent rejects a message from any
+        // OTHER frame (a malicious sibling, an ad, anything else sharing
+        // this page) even though this document can't name its parent's
+        // origin as a string. Flagged in a 2026-09-18 security review.
+        if (event.source !== window.parent) return;
         var card = extractCard(event.data);
         if (card) render(card);
       });

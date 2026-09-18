@@ -111,3 +111,15 @@ test("renderCardAppHtml's script listens for postMessage and sends a ui/initiali
   assert.match(html, /ui\/initialize/);
   assert.match(html, /window\.parent\.postMessage/);
 });
+
+test("renderCardAppHtml's message listener checks event.source against window.parent before trusting anything (per the MCP Apps messaging model)", () => {
+  // A 2026-09-18 security review flagged the listener accepting a message
+  // from ANY frame with no origin/source check at all. event.origin isn't
+  // reliably checkable here (a sandboxed iframe with no allow-same-origin
+  // has an opaque origin, and so, typically, does its parent), so the fix
+  // is event.source -- postMessage always sets it to the real sending
+  // window regardless of origin.
+  const html = renderCardAppHtml();
+  const listenerBody = html.slice(html.indexOf('addEventListener("message"'));
+  assert.match(listenerBody.slice(0, 1200), /event\.source\s*!==\s*window\.parent/);
+});

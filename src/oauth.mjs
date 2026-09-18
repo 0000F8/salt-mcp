@@ -78,10 +78,24 @@ export function protectedResourceMetadataPaths(resourcePath) {
  * The exact WWW-Authenticate header value for a 401 response, per RFC 9728
  * Section 5.1: `Bearer resource_metadata="<url>"`. `metadataUrl` should be
  * the ABSOLUTE URL of the (suffixed, most-specific) protected resource
- * metadata document.
+ * metadata document. Used when there's no credential at all -- see
+ * wwwAuthenticateInvalidTokenHeader for a token that WAS presented but is
+ * wrong (wrong shape, or rejected by salt-api).
  */
 export function wwwAuthenticateHeader(metadataUrl) {
   return `Bearer resource_metadata="${metadataUrl}"`;
+}
+
+/**
+ * The WWW-Authenticate value for a token that was presented but is
+ * invalid -- doesn't have the `sat_` prefix this resource's tokens always
+ * carry, or salt-api itself rejected it (expired/revoked/malformed). Per
+ * RFC 6750 Section 3.1, the `error="invalid_token"` parameter is what
+ * tells a compliant client its token is bad and it should re-authenticate
+ * (get a fresh one) rather than retry the same one.
+ */
+export function wwwAuthenticateInvalidTokenHeader(metadataUrl) {
+  return `Bearer error="invalid_token", resource_metadata="${metadataUrl}"`;
 }
 
 /**
@@ -131,7 +145,11 @@ export function protectedResourceMetadataUrl(config) {
 /**
  * Sends the spec-conformant 401 for "no valid bearer" -- both the JSON-RPC
  * error body this codebase's other 401 (missing legacy headers) already
- * used, and the WWW-Authenticate header RFC 9728 requires.
+ * used, and the WWW-Authenticate header RFC 9728 requires. Use this ONLY
+ * when no credential was presented at all (or the Authorization header
+ * doesn't even parse as `Bearer <token>`) -- a token that WAS presented
+ * but is wrong gets sendInvalidToken instead, so a client can tell "you
+ * never tried" from "that token is bad, get a new one."
  */
 export function sendUnauthorized(res, config) {
   res
@@ -140,6 +158,25 @@ export function sendUnauthorized(res, config) {
     .json({
       jsonrpc: "2.0",
       error: { code: -32001, message: "Missing or malformed Authorization: Bearer token" },
+      id: null,
+    });
+}
+
+/**
+ * Sends the 401 for a token that WAS presented (parsed as `Bearer <token>`)
+ * but is invalid -- wrong prefix (never a `sat_...` token this resource
+ * issues, e.g. a JWT from somewhere else) or rejected by salt-api itself.
+ * `error="invalid_token"` (RFC 6750 Section 3.1) is the signal a compliant
+ * OAuth client uses to know it should discard this token and get a fresh
+ * one, rather than retry the same bad token forever.
+ */
+export function sendInvalidToken(res, config) {
+  res
+    .status(401)
+    .set("WWW-Authenticate", wwwAuthenticateInvalidTokenHeader(protectedResourceMetadataUrl(config)))
+    .json({
+      jsonrpc: "2.0",
+      error: { code: -32001, message: "invalid_token" },
       id: null,
     });
 }

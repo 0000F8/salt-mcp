@@ -44,10 +44,21 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import pkg from "salt-agent-sdk";
 import { toMcpTools } from "./annotations.mjs";
-import { loadOAuthConfig, registerProtectedResourceRoutes, extractBearerToken, sendUnauthorized } from "./oauth.mjs";
+import { loadOAuthConfig, registerProtectedResourceRoutes, extractBearerToken, sendUnauthorized, sendInvalidToken } from "./oauth.mjs";
 import { createSaltBearerClient } from "./salt-bearer-client.mjs";
-import { KEYLESS_TOOL_NAMES, toKeylessMcpTools, runKeylessTool } from "./keyless-tools.mjs";
+import { KEYLESS_TOOLS, toKeylessMcpTools, runKeylessTool } from "./keyless-tools.mjs";
 import { CARD_UI_RESOURCE_URI, CARD_UI_MIME_TYPE, renderCardAppHtml } from "./card-ui.mjs";
+import { createTokenValidator } from "./token-validator.mjs";
+import { validateAgainstSchema } from "./validate-input.mjs";
+
+// Every access token this resource server issues starts with `sat_` (the
+// K5 contract's own naming). A bearer that doesn't -- most dangerously, a
+// JWT, since one might genuinely be a valid credential for some OTHER
+// service -- is refused before this server so much as looks at it: never
+// forwarded to salt-api, never treated as a candidate. A 2026-09-18
+// security review found the pre-fix code forwarding a JWT-shaped bearer
+// straight through unchanged.
+const ACCESS_TOKEN_PREFIX = "sat_";
 
 const { createSaltClient, createIdentityStore, createActions } = pkg;
 
@@ -124,8 +135,20 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
 
   // --- OAuth bearer path: the keyless toolset -----------------------------
   const rest = createSaltBearerClient({ host: HOST, fetchImpl });
+  // Validates a bearer against salt-api (GET /api/v1/oauth2/grant) once
+  // per request, cached ~30s by token digest -- see token-validator.mjs's
+  // header comment for why this exists at all (an unchecked bearer used
+  // to sail straight through to tools/list and tools/call) and why the
+  // cache key is a digest, never the raw token.
+  const tokenValidator = createTokenValidator({ rest });
 
-  function buildKeylessServer(bearerToken) {
+  // `requestCtx` carries the AbortSignal for this HTTP request (so
+  // ask_human/get_ask_result stop polling salt-api the moment the client
+  // disconnects -- see keyless-tools.mjs's pollForCardInteraction) and the
+  // grant this token validated to (so money tools spend a wallet the
+  // human actually attached to it, never a re-fetch, never a wallet of
+  // the agent's own -- it has none).
+  function buildKeylessServer(bearerToken, requestCtx) {
     const server = new Server(
       { name: "salt-mcp-keyless", version: PACKAGE_VERSION },
       { capabilities: { tools: {}, resources: {} } }
@@ -133,11 +156,21 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
     server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toKeylessMcpTools() }));
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
-      if (!KEYLESS_TOOL_NAMES.has(name)) {
+      const tool = KEYLESS_TOOLS.find((t) => t.name === name);
+      if (!tool) {
         return { content: [{ type: "text", text: `Tool "${name}" is not available on this connection.` }], isError: true };
       }
+      // The low-level Server hands CallToolRequest.params.arguments to
+      // this handler as-is -- it does NOT validate them against the
+      // tool's own inputSchema. A 2026-09-18 security review flagged that
+      // gap; this closes it with the same ajv setup
+      // scripts/validate-server-json.mjs already uses for server.json.
+      const { valid, message } = validateAgainstSchema(tool.inputSchema, args ?? {});
+      if (!valid) {
+        return { content: [{ type: "text", text: `Invalid arguments for "${name}": ${message}` }], isError: true };
+      }
       try {
-        const result = await runKeylessTool(name, args, { rest, bearerToken });
+        const result = await runKeylessTool(name, args, { rest, bearerToken, signal: requestCtx.signal, grant: requestCtx.grant });
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
       } catch (err) {
         return { content: [{ type: "text", text: err?.message || String(err) }], isError: true };
@@ -176,6 +209,15 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
   // leak between clients.
   app.post("/mcp", async (req, res) => {
     const legacyCaller = callerFromHeaders(req);
+
+    // Stops any in-flight ask_human/get_ask_result poll (see
+    // keyless-tools.mjs's pollForCardInteraction) the instant this
+    // request's connection closes -- a client that hangs up shouldn't
+    // leave this server hitting salt-api on its behalf for up to another
+    // 50s. Harmless to create even on the legacy path, which never reads it.
+    const controller = new AbortController();
+    res.on("close", () => controller.abort());
+
     let server;
     if (legacyCaller) {
       server = buildLegacyServer(legacyCaller);
@@ -184,7 +226,29 @@ export function createApp({ host, fetchImpl, oauthConfig } = {}) {
       if (!bearerToken) {
         return sendUnauthorized(res, config);
       }
-      server = buildKeylessServer(bearerToken);
+      // Refuse anything that isn't shaped like a token THIS resource
+      // issues -- before it ever reaches salt-api. A JWT, an api-key, or
+      // plain garbage all fail this the same way.
+      if (!bearerToken.startsWith(ACCESS_TOKEN_PREFIX)) {
+        return sendInvalidToken(res, config);
+      }
+      let validation;
+      try {
+        validation = await tokenValidator.validate(bearerToken);
+      } catch {
+        // salt-api itself is unreachable/erroring -- not the same claim
+        // as "this token is bad", so this is a 502, not a 401 (and the
+        // token validator deliberately does not cache this outcome).
+        return res.status(502).json({
+          jsonrpc: "2.0",
+          error: { code: -32003, message: "Could not reach Salt to validate this token. Try again shortly." },
+          id: null,
+        });
+      }
+      if (!validation.valid) {
+        return sendInvalidToken(res, config);
+      }
+      server = buildKeylessServer(bearerToken, { signal: controller.signal, grant: validation });
     }
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => { transport.close(); server.close(); });

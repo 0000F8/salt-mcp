@@ -4,6 +4,11 @@
 // REAL bearer-token pass-through -- only the outbound leg to salt-api is
 // mocked (via `fetchImpl` injection into createApp, exactly as the task
 // asked for), never Express or the MCP protocol layer itself.
+//
+// Every bearer-authenticated request now validates the token against
+// GET /api/v1/oauth2/grant BEFORE doing anything else (src/token-validator.mjs,
+// added by a 2026-09-18 security review), so every test below that
+// presents a bearer mocks that route too.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,11 +23,13 @@ async function listen(app) {
   return { server, baseUrl: `http://127.0.0.1:${port}` };
 }
 
-function fakeSaltApi(routes) {
+function fakeSaltApi(routes, calls) {
   return async (url, init = {}) => {
     const { pathname, search } = new URL(url);
-    const key = `${(init.method || "GET").toUpperCase()} ${pathname}`;
-    const handler = routes[key] ?? routes[`${(init.method || "GET").toUpperCase()} ${pathname}${search}`];
+    const method = (init.method || "GET").toUpperCase();
+    if (calls) calls.push({ method, pathname, search, authHeader: init.headers?.Authorization ?? init.headers?.authorization });
+    const key = `${method} ${pathname}`;
+    const handler = routes[key] ?? routes[`${method} ${pathname}${search}`];
     if (!handler) {
       return new Response(JSON.stringify({ error: `no mock route for ${key}${search}` }), { status: 404 });
     }
@@ -33,6 +40,11 @@ function fakeSaltApi(routes) {
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+}
+
+/** A default GET /api/v1/oauth2/grant mock -- most tests just need any valid grant. */
+function grantRoute(body = { scopes: ["chat", "money"], wallets: [] }) {
+  return { "GET /api/v1/oauth2/grant": async () => json(body) };
 }
 
 // --- RFC 9728 discovery, unauthenticated -----------------------------------
@@ -120,11 +132,98 @@ test("the legacy X-Salt-Api-Key / X-Salt-App-Id header path keeps working unchan
   }
 });
 
+// --- bearer token validation itself: prefix + salt-api check --------------
+
+test("a bearer that doesn't start with sat_ (e.g. a JWT) is refused with 401 invalid_token, and salt-api is NEVER called", async () => {
+  const calls = [];
+  const app = createApp({ host: "https://fake-salt.test", fetchImpl: fakeSaltApi({}, calls) });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.x.y" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    assert.equal(res.status, 401);
+    assert.equal(
+      res.headers.get("www-authenticate"),
+      'Bearer error="invalid_token", resource_metadata="https://mcp.saltapp.ai/.well-known/oauth-protected-resource/mcp"'
+    );
+    assert.deepEqual(calls, [], "a JWT-shaped (non sat_) bearer must never reach salt-api, not even once");
+  } finally {
+    server.close();
+  }
+});
+
+test("a garbage bearer with the right prefix but rejected by salt-api's grant check is refused with 401 invalid_token", async () => {
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: fakeSaltApi({ "GET /api/v1/oauth2/grant": async () => json({ error: "invalid or expired token" }, 401) }),
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer sat_not_a_real_token" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    assert.equal(res.status, 401);
+    assert.match(res.headers.get("www-authenticate") || "", /error="invalid_token"/);
+  } finally {
+    server.close();
+  }
+});
+
+test("tools/list itself is refused for a garbage bearer -- validation happens before ANY MCP method is served, not just tools/call", async () => {
+  // The exact probe finding this regression-tests: an earlier build
+  // returned tools/list's real catalog for literally any bearer shaped
+  // like "Bearer <something>", never once asking salt-api whether it was
+  // real. `initialize` (the SDK Client's own handshake) hits this same
+  // gate, so a raw fetch is used here to make sure a bare tools/list
+  // request -- with no prior handshake -- is refused too.
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: fakeSaltApi({ "GET /api/v1/oauth2/grant": async () => json({ error: "nope" }, 401) }),
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: "Bearer sat_garbage" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    assert.equal(res.status, 401);
+  } finally {
+    server.close();
+  }
+});
+
+test("salt-api being unreachable during token validation is a 502, never a 401 (and is not cached as invalid)", async () => {
+  const app = createApp({
+    host: "https://fake-salt.test",
+    fetchImpl: async () => {
+      throw new Error("ECONNREFUSED (simulated)");
+    },
+  });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const res = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer sat_whatever" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    assert.equal(res.status, 502);
+  } finally {
+    server.close();
+  }
+});
+
 // --- OAuth bearer path: the keyless toolset, real pass-through -------------
 
-test("POST /mcp with a bearer token lists the keyless toolset and forwards the bearer to salt-api on a tool call, never storing it", async () => {
+test("POST /mcp with a valid bearer token lists the keyless toolset and forwards the bearer to salt-api on a tool call, never storing it", async () => {
   let sawAuthHeader;
   const fetchImpl = fakeSaltApi({
+    ...grantRoute(),
     "GET /api/v1/agents": async ({ authHeader }) => {
       sawAuthHeader = authHeader;
       return json([{ id: "a1", username: "faucet", display_name: "Faucet", category: "utility" }]);
@@ -155,8 +254,34 @@ test("POST /mcp with a bearer token lists the keyless toolset and forwards the b
   }
 });
 
+test("a tool call with arguments that don't match its inputSchema is refused before execute() ever runs", async () => {
+  const calls = [];
+  const fetchImpl = fakeSaltApi(grantRoute(), calls);
+  const app = createApp({ host: "https://fake-salt.test", fetchImpl });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const client = new Client({ name: "test-schema-client", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: "Bearer sat_schema" } },
+    });
+    await client.connect(transport);
+    calls.length = 0; // drop the grant-validation call from the connect handshake
+
+    // send_message requires chat_id and text; omit text entirely.
+    const result = await client.callTool({ name: "send_message", arguments: { chat_id: "11111111-1111-1111-1111-111111111111" } });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /Invalid arguments for "send_message"/);
+    assert.deepEqual(calls, [], "an invalid call must never reach salt-api at all");
+
+    await client.close();
+  } finally {
+    server.close();
+  }
+});
+
 test("a money-scoped tool call that salt-api 403s comes back as a plain-sentence tool error, not a transport failure", async () => {
   const fetchImpl = fakeSaltApi({
+    ...grantRoute({ scopes: ["chat"], wallets: [] }),
     "GET /api/v1/transfer_requests": async () => json({ error: "insufficient scope" }, 403),
   });
   const app = createApp({ host: "https://fake-salt.test", fetchImpl });
@@ -167,9 +292,36 @@ test("a money-scoped tool call that salt-api 403s comes back as a plain-sentence
       requestInit: { headers: { Authorization: "Bearer sat_no_money_scope" } },
     });
     await client.connect(transport);
-    const result = await client.callTool({ name: "get_payment_status", arguments: { request_id: "r1" } });
+    const result = await client.callTool({ name: "get_payment_status", arguments: { request_id: "55555555-5555-5555-5555-555555555555" } });
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /This connection wasn't given permission to request money\./);
+    await client.close();
+  } finally {
+    server.close();
+  }
+});
+
+test("a path-traversal-shaped card_id is refused before any outbound salt-api call for that tool, over the real wire", async () => {
+  const calls = [];
+  const fetchImpl = fakeSaltApi(grantRoute(), calls);
+  const app = createApp({ host: "https://fake-salt.test", fetchImpl });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const client = new Client({ name: "test-traversal-client", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: "Bearer sat_traversal" } },
+    });
+    await client.connect(transport);
+    calls.length = 0; // drop the grant-validation call from the connect handshake
+
+    const result = await client.callTool({
+      name: "update_card",
+      arguments: { card_id: "../agents/callback?webhook=https://attacker.example/hook", blocks: [{ type: "divider" }] },
+    });
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /card_id must be a plain Salt id/);
+    assert.deepEqual(calls, [], "no outbound call at all -- not to /api/v1/cards/*, and definitely not to /api/v1/agents/callback");
+
     await client.close();
   } finally {
     server.close();
@@ -179,7 +331,7 @@ test("a money-scoped tool call that salt-api 403s comes back as a plain-sentence
 // --- MCP Apps resource ------------------------------------------------------
 
 test("resources/list and resources/read serve the ui://salt/card MCP Apps resource on the OAuth path", async () => {
-  const app = createApp({ host: "https://fake-salt.test", fetchImpl: fakeSaltApi({}) });
+  const app = createApp({ host: "https://fake-salt.test", fetchImpl: fakeSaltApi(grantRoute()) });
   const { server, baseUrl } = await listen(app);
   try {
     const client = new Client({ name: "test-resources-client", version: "0.0.0" });

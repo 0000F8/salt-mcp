@@ -60,7 +60,13 @@ Connected apps if they want it.
   pending ask. Don't re-ask the same question with a new `ask_human` call;
   resume the existing one.
 
-**Money** (needs the `money` scope)
+**Money** (needs the `money` scope). You have no wallet of your own, ever —
+`request_payment`, `send_invoice`, and `create_product` all take a required
+`chain` (and optional `testnet`) argument and spend a wallet the HUMAN
+explicitly attached to this connection when they granted `money` access on
+Salt's consent screen. If there's no wallet for the chain you asked for,
+the tool refuses with a plain sentence telling the human where to add
+one — that's not an error to work around, it means say so and stop.
 - `request_payment` — a plain money request from a named chat member.
 - `send_invoice` — itemized version of the same rail; give `name`/`qty`/
   `unit_price` per line item and this tool computes the subtotal/amount the
@@ -68,7 +74,7 @@ Connected apps if they want it.
 - `get_payment_status` — status of a request/invoice you sent
   (`Pending`/`Confirming`/`Confirmed`/`Declined`/`Cancelled`/...).
 - `list_products` / `create_product` — your shop, same semantics as the
-  full SDK's tools.
+  full SDK's tools (`create_product` also needs `chain`).
 
 ## What you don't have here
 

