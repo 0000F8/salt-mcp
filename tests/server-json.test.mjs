@@ -1,0 +1,80 @@
+// Validates server.json against the vendored official MCP Registry schema
+// (schemas/server.schema.json) and checks the specific shape this repo's
+// server.json is supposed to have per the mcp-pack lane brief: the npm
+// package (stdio) with its env vars, and the hosted streamable-http remote
+// with its two required secret headers.
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { validateServerJson, loadSchema } from "../scripts/validate-server-json.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const serverJsonPath = path.join(here, "..", "server.json");
+
+function readServerJson() {
+  return JSON.parse(readFileSync(serverJsonPath, "utf8"));
+}
+
+test("server.json validates against the official MCP Registry server.schema.json", () => {
+  const serverJson = readServerJson();
+  const schema = loadSchema();
+  const { valid, errors } = validateServerJson(serverJson, schema);
+  assert.equal(
+    valid,
+    true,
+    "server.json failed schema validation:\n" + errors.map((e) => `  ${e.instancePath || "/"} ${e.message}`).join("\n")
+  );
+});
+
+test("server.json name matches the MCP Registry namespace and package.json's mcpName", () => {
+  const serverJson = readServerJson();
+  const pkg = JSON.parse(readFileSync(path.join(here, "..", "package.json"), "utf8"));
+  assert.equal(serverJson.name, "ai.saltapp/salt");
+  assert.equal(pkg.mcpName, serverJson.name, "package.json's mcpName must match server.json's name exactly (registry ownership check)");
+});
+
+test("server.json lists the npm package as a stdio transport with the documented env vars", () => {
+  const serverJson = readServerJson();
+  const npmPackage = (serverJson.packages || []).find((p) => p.registryType === "npm");
+  assert.ok(npmPackage, "expected an npm package entry");
+  assert.equal(npmPackage.identifier, "salt-mcp");
+  assert.equal(npmPackage.transport.type, "stdio");
+  assert.notEqual(npmPackage.version, "latest", "package version must be a specific version, not a range or 'latest'");
+
+  const envByName = Object.fromEntries((npmPackage.environmentVariables || []).map((e) => [e.name, e]));
+  const requiredSecrets = ["SALT_API_KEY", "APP_PRIVATE_KEY", "PGP_PASSPHRASE"];
+  for (const name of requiredSecrets) {
+    assert.ok(envByName[name], `missing environment variable ${name}`);
+    assert.equal(envByName[name].isRequired, true, `${name} should be required`);
+    assert.equal(envByName[name].isSecret, true, `${name} should be marked secret`);
+  }
+  assert.ok(envByName.HOST?.isRequired, "HOST should be required");
+  assert.ok(envByName.SALT_APP_ID?.isRequired, "SALT_APP_ID should be required");
+  assert.ok(envByName.APP_PUBLIC_KEY?.isRequired, "APP_PUBLIC_KEY should be required");
+  // Optional ones stay optional.
+  assert.equal(envByName.WALLET_MASTER_KEY?.isRequired, false);
+  assert.equal(envByName.CONCIERGE_AGENT_ID?.isRequired, false);
+});
+
+test("server.json lists the hosted streamable-http remote with the two required secret headers", () => {
+  const serverJson = readServerJson();
+  const remote = (serverJson.remotes || [])[0];
+  assert.ok(remote, "expected a remote entry");
+  assert.equal(remote.type, "streamable-http");
+  assert.equal(remote.url, "https://mcp.saltapp.ai/mcp");
+
+  const headerByName = Object.fromEntries((remote.headers || []).map((h) => [h.name, h]));
+  for (const name of ["X-Salt-Api-Key", "X-Salt-App-Id"]) {
+    assert.ok(headerByName[name], `missing header ${name}`);
+    assert.equal(headerByName[name].isRequired, true, `${name} should be required`);
+    assert.equal(headerByName[name].isSecret, true, `${name} should be marked secret`);
+  }
+});
+
+test("server.json's description fits the registry's 100-character limit", () => {
+  const serverJson = readServerJson();
+  assert.ok(serverJson.description.length <= 100, `description is ${serverJson.description.length} chars, limit is 100`);
+});

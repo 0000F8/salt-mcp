@@ -1,0 +1,17 @@
+# Keep the .mcpb focused on the running server (manifest.json + src/ +
+# node_modules). Everything else here is repo/distribution scaffolding for
+# other install paths (npm, the MCP Registry, the Claude Code plugin, the
+# Cursor/VS Code deeplinks) that a Desktop Extension install doesn't need.
+.git
+.gitignore
+.claude-plugin
+.mcp.json
+schemas
+scripts
+skills
+tests
+server.json
+package-lock.json
+*.test.mjs
+*.mcpb
+README.md
