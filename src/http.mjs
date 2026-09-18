@@ -16,42 +16,32 @@
 //
 // Env: HOST (Salt API base), PORT (default 5200).
 
+import { readFileSync } from "node:fs";
 import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import pkg from "salt-agent-sdk";
+import { toMcpTools } from "./annotations.mjs";
 
 const { createSaltClient, createIdentityStore, createActions } = pkg;
 
-const HOST = (process.env.HOST || "").replace(/\/$/, "");
-const PORT = parseInt(process.env.PORT || "5200", 10);
-if (!HOST) {
-  console.error("[salt-mcp-http] HOST is required");
-  process.exit(1);
-}
+const { version: PACKAGE_VERSION } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8")
+);
 
 // The api-key-only, chat-free tools this hosted endpoint exposes. Everything
 // else the SDK offers (messaging, delegation, hand-off, cards, wallet/agent
 // creation) needs a live chat and/or the caller's private key, so it is NOT
-// served here -- see the local stdio server for those.
-const HOSTED_TOOLS = new Set(["list_salt_agents", "list_products", "create_product"]);
-
-// One shared client + action layer. The caller identity is supplied
-// per-request (below); this store is just the empty scaffold createActions
-// requires. No walletMasterKey/globalAgentId -> wallet/agent provisioning off.
-const client = createSaltClient({ host: HOST });
-const actions = createActions({
-  client,
-  identities: createIdentityStore(),
-  pgpPassphrase: "unused-on-hosted",
-  publicWebhookUrl: "",
-});
-const hostedDefinitions = actions.definitions.filter((d) => HOSTED_TOOLS.has(d.name));
+// served here -- see the local stdio server for those. Exported (and
+// re-checked in tests/annotations.test.mjs) so a change here is what a test
+// diffs against, not a second hand-maintained list.
+export const HOSTED_TOOLS = new Set(["list_salt_agents", "list_products", "create_product"]);
 
 // A per-request caller built ONLY from that request's headers. Empty PGP keys:
-// the hosted tools never touch them, and we never want them here.
-function callerFromHeaders(req) {
+// the hosted tools never touch them, and we never want them here. Pure and
+// side-effect-free, so tests import it directly.
+export function callerFromHeaders(req) {
   const apiKey = req.get("X-Salt-Api-Key");
   const appId = req.get("X-Salt-App-Id");
   if (!apiKey || !appId) return null;
@@ -61,52 +51,80 @@ function callerFromHeaders(req) {
   return { saltAppId: appId, apiKey, publicKey: "", privateKey: "" };
 }
 
-function buildServer(caller) {
-  const server = new Server({ name: "salt-mcp-hosted", version: "0.1.0" }, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: hostedDefinitions.map((d) => ({ name: d.name, description: d.description, inputSchema: d.schema })),
-  }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    if (!HOSTED_TOOLS.has(name)) {
-      return { content: [{ type: "text", text: `Tool "${name}" is not available on the hosted endpoint.` }], isError: true };
-    }
-    try {
-      const result = await actions.execute(name, args ?? {}, caller, { depth: 0, mainChatId: null });
-      const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-      return { content: [{ type: "text", text }] };
-    } catch (err) {
-      return { content: [{ type: "text", text: `Salt tool "${name}" failed: ${err?.message || err}` }], isError: true };
-    }
+// Everything below has real side effects (reads env, may process.exit, opens
+// a listening socket) so it only runs when this file is the process entry
+// point -- never on import, e.g. from a test.
+function main() {
+  const HOST = (process.env.HOST || "").replace(/\/$/, "");
+  const PORT = parseInt(process.env.PORT || "5200", 10);
+  if (!HOST) {
+    console.error("[salt-mcp-http] HOST is required");
+    process.exit(1);
+  }
+
+  // One shared client + action layer. The caller identity is supplied
+  // per-request (above); this store is just the empty scaffold createActions
+  // requires. No walletMasterKey/globalAgentId -> wallet/agent provisioning off.
+  const client = createSaltClient({ host: HOST });
+  const actions = createActions({
+    client,
+    identities: createIdentityStore(),
+    pgpPassphrase: "unused-on-hosted",
+    publicWebhookUrl: "",
   });
-  return server;
+  const hostedDefinitions = actions.definitions.filter((d) => HOSTED_TOOLS.has(d.name));
+
+  function buildServer(caller) {
+    const server = new Server({ name: "salt-mcp-hosted", version: PACKAGE_VERSION }, { capabilities: { tools: {} } });
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: toMcpTools(hostedDefinitions),
+    }));
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+      const { name, arguments: args } = request.params;
+      if (!HOSTED_TOOLS.has(name)) {
+        return { content: [{ type: "text", text: `Tool "${name}" is not available on the hosted endpoint.` }], isError: true };
+      }
+      try {
+        const result = await actions.execute(name, args ?? {}, caller, { depth: 0, mainChatId: null });
+        const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `Salt tool "${name}" failed: ${err?.message || err}` }], isError: true };
+      }
+    });
+    return server;
+  }
+
+  const app = express();
+  app.use(express.json());
+
+  // Unauthenticated liveness probe for the ALB target group.
+  app.get("/health", (_req, res) => res.status(200).json({ status: "ok", tools: hostedDefinitions.length }));
+
+  // Stateless Streamable HTTP: each POST is an independent MCP request carrying
+  // its own credentials. A fresh server+transport per request keeps callers
+  // fully isolated -- no shared session state, nothing to leak between clients.
+  app.post("/mcp", async (req, res) => {
+    const caller = callerFromHeaders(req);
+    if (!caller) {
+      return res.status(401).json({
+        jsonrpc: "2.0",
+        error: { code: -32001, message: "Missing X-Salt-Api-Key / X-Salt-App-Id headers" },
+        id: null,
+      });
+    }
+    const server = buildServer(caller);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    res.on("close", () => { transport.close(); server.close(); });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  });
+
+  app.listen(PORT, () => {
+    console.error(`[salt-mcp-http] listening on :${PORT} -> ${HOST}; ${hostedDefinitions.length} hosted tools`);
+  });
 }
 
-const app = express();
-app.use(express.json());
-
-// Unauthenticated liveness probe for the ALB target group.
-app.get("/health", (_req, res) => res.status(200).json({ status: "ok", tools: hostedDefinitions.length }));
-
-// Stateless Streamable HTTP: each POST is an independent MCP request carrying
-// its own credentials. A fresh server+transport per request keeps callers
-// fully isolated -- no shared session state, nothing to leak between clients.
-app.post("/mcp", async (req, res) => {
-  const caller = callerFromHeaders(req);
-  if (!caller) {
-    return res.status(401).json({
-      jsonrpc: "2.0",
-      error: { code: -32001, message: "Missing X-Salt-Api-Key / X-Salt-App-Id headers" },
-      id: null,
-    });
-  }
-  const server = buildServer(caller);
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  res.on("close", () => { transport.close(); server.close(); });
-  await server.connect(transport);
-  await transport.handleRequest(req, res, req.body);
-});
-
-app.listen(PORT, () => {
-  console.error(`[salt-mcp-http] listening on :${PORT} -> ${HOST}; ${hostedDefinitions.length} hosted tools`);
-});
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}
