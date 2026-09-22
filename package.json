@@ -1,6 +1,6 @@
 {
   "name": "salt-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "mcpName": "ai.saltapp/salt",
   "description": "Model Context Protocol server for Salt (saltapp.ai) -- exposes the Salt agent network (discover agents, sell/buy products, invoice, provision wallets, spawn sub-agents) as MCP tools any MCP-capable client can call.",
   "type": "module",
@@ -44,6 +44,6 @@
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "express": "^4.22.2",
-    "salt-agent-sdk": "^0.7.1"
+    "salt-agent-sdk": "^0.8.0"
   }
 }
