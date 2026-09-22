@@ -247,7 +247,11 @@ export function createApp({ host, fetchImpl, oauthConfig, env, rateLimiter, rate
     // Rate limit FIRST -- ahead of legacy/bearer branching, ahead of
     // token validation, ahead of everything. See src/rate-limiter.mjs's
     // header comment for why this sits here specifically.
-    const callerIp = callerIpFromRequest(req) || "unknown";
+    // requestEnv, not process.env: the rate limiter and the edge-header
+    // relay must bucket on exactly the same notion of "who is this", and
+    // TRUSTED_PROXY_HOPS is what decides it. Two sources would let them
+    // disagree, which is the shape of the bug this whole path just had.
+    const callerIp = callerIpFromRequest(req, requestEnv) || "unknown";
     const rateCheck = limiter.check(callerIp);
     if (!rateCheck.allowed) {
       return res

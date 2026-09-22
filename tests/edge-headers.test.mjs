@@ -16,12 +16,32 @@ test("EDGE_SECRET unset: sends neither the secret nor the IP headers", () => {
 });
 
 test("EDGE_SECRET set, a caller IP known: all three headers, exact shapes", () => {
-  const headers = buildEdgeHeaders(fakeReq("203.0.113.7, 15.197.140.10"), { EDGE_SECRET: "top-secret" });
+  // The LAST entry is the address the ALB observed; the prefix is whatever
+  // the caller chose to send. Relaying the prefix under the real EDGE_SECRET
+  // is what let a caller pick their own `request.remote_ip` on salt-api.
+  const headers = buildEdgeHeaders(fakeReq("1.2.3.4, 203.0.113.7"), { EDGE_SECRET: "top-secret" });
   assert.deepEqual(headers, {
     "X-Salt-Edge": "top-secret",
     "CloudFront-Viewer-Address": "203.0.113.7:0",
     "X-Forwarded-For": "203.0.113.7",
   });
+});
+
+test("a forged X-Forwarded-For prefix is never what gets relayed", () => {
+  const headers = buildEdgeHeaders(
+    fakeReq("198.51.100.42, 9.9.9.9, 203.0.113.7"),
+    { EDGE_SECRET: "top-secret" },
+  );
+  assert.equal(headers["X-Forwarded-For"], "203.0.113.7");
+  assert.equal(headers["CloudFront-Viewer-Address"], "203.0.113.7:0");
+});
+
+test("TRUSTED_PROXY_HOPS is honoured through buildEdgeHeaders", () => {
+  const headers = buildEdgeHeaders(
+    fakeReq("203.0.113.7, 15.197.140.10"),
+    { EDGE_SECRET: "top-secret", TRUSTED_PROXY_HOPS: "1" },
+  );
+  assert.equal(headers["X-Forwarded-For"], "203.0.113.7");
 });
 
 test("EDGE_SECRET set but no IP could be determined: sends the secret alone, no IP headers", () => {

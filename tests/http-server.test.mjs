@@ -428,7 +428,7 @@ test("different caller IPs (via X-Forwarded-For) get independent rate-limit budg
 
 // --- availability (N2): edge secret + real caller IP on outbound calls ----
 
-test("EDGE_SECRET set: every outbound salt-api call carries X-Salt-Edge and the real caller's IP, derived from X-Forwarded-For's first hop", async () => {
+test("EDGE_SECRET set: every outbound salt-api call carries X-Salt-Edge and the real caller's IP, read from the RIGHT of X-Forwarded-For", async () => {
   const calls = [];
   const app = createApp({
     host: "https://fake-salt.test",
@@ -442,8 +442,9 @@ test("EDGE_SECRET set: every outbound salt-api call carries X-Salt-Edge and the 
       headers: {
         "Content-Type": "application/json",
         Authorization: "Bearer sat_edge_test",
-        // CloudFront's own forwarded value, then the ALB's own appended hop.
-        "X-Forwarded-For": "203.0.113.7, 15.197.140.10",
+        // A forged prefix, then the address the ALB appended. Only the
+        // latter may be relayed onward under the edge secret.
+        "X-Forwarded-For": "1.2.3.4, 203.0.113.7",
       },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
     });

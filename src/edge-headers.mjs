@@ -34,7 +34,7 @@ export function buildEdgeHeaders(req, env = process.env) {
   const edgeSecret = env.EDGE_SECRET;
   if (!edgeSecret) return {};
   const headers = { "X-Salt-Edge": edgeSecret };
-  const ip = callerIpFromRequest(req);
+  const ip = callerIpFromRequest(req, env);
   if (ip) {
     headers["CloudFront-Viewer-Address"] = `${ip}:0`;
     headers["X-Forwarded-For"] = ip;
