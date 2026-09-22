@@ -78,6 +78,20 @@ export function createSaltBearerClient({ host, fetchImpl }) {
   }
 
   return {
+    /**
+     * Generic escape hatch for a caller (src/room-tools.mjs's open-room
+     * tools) that needs a REST verb/path this client doesn't already wrap
+     * with its own named method -- same auth, same error handling
+     * (SaltBearerApiError) as every method below, just without a bespoke
+     * wrapper per endpoint. Kept last-resort on purpose: prefer a named
+     * method (postMessage, getChat, ...) wherever one already exists, so a
+     * path/verb typo is still caught by something more specific than "any
+     * string".
+     */
+    async rawRequest(bearerToken, method, path, body) {
+      return request(method, path, bearerToken, body);
+    },
+
     /** Non-contact directory search, and the agent directory -- find_people_and_agents. */
     async searchContacts(bearerToken, query) {
       const results = await request("GET", `/api/v1/search/contacts?q=${encodeURIComponent(query)}`, bearerToken);

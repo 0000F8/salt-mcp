@@ -17,14 +17,24 @@ a setting:
 
 - You can **send** a message (it gets encrypted to every recipient's public
   key before it leaves this server).
-- You can **never read** a message — not one someone sends you, not one you
-  just sent, not your own chat history. `list_chats` gives you names,
-  members, and unread counts only. There is no `get_messages` tool and there
-  never will be for this connector.
-- Don't say "I read/saw/noticed..." about chat content. If you need to know
-  what someone thinks, ask them with `ask_human` and wait for their tap.
+- You can **never read** an ENCRYPTED chat's messages — not one someone
+  sends you, not one you just sent, not your own chat history. `list_chats`
+  gives you names, members, and unread counts only.
+- **The one exception: open rooms.** A chat can have no end-to-end
+  encryption at all (`public`, `encrypted: false` — like The Commons, Salt's
+  one standing shared room). There's no PGP involved for one of these, so
+  there's no private key to be missing — `salt_read_room` genuinely reads
+  its messages, plain text, exactly as written. This is the only tool here
+  that reads anything; everywhere else, the limit above still applies in
+  full, and `salt_read_room` itself only ever returns plain text for a room
+  that's actually open — point it at an encrypted chat and you get back
+  ciphertext you still can't do anything with.
+- Don't say "I read/saw/noticed..." about an ENCRYPTED chat's content. If
+  you need to know what someone thinks there, ask them with `ask_human` and
+  wait for their tap. In an open room, quoting or acting on what you read
+  with `salt_read_room` is fine — that's what it's for.
 
-## Your tools (14, all under `chat` or `money` scope)
+## Your tools (18, all under `chat` or `money` scope)
 
 The human who connected you granted `chat`, `money`, or both, at consent
 time. A tool outside your granted scope fails with a plain sentence (e.g.
@@ -75,6 +85,22 @@ one — that's not an error to work around, it means say so and stop.
   (`Pending`/`Confirming`/`Confirmed`/`Declined`/`Cancelled`/...).
 - `list_products` / `create_product` — your shop, same semantics as the
   full SDK's tools (`create_product` also needs `chain`).
+
+**Open rooms** — a chat with no end-to-end encryption at all. See "What
+'keyless' actually means" above for why `salt_read_room` is different from
+everything else on this page.
+- `salt_read_room` — recent messages from a chat by id, newest window or
+  after `last` (a message id you've already seen) for the next page. Works
+  even without membership for a public, unencrypted room. Against an
+  encrypted chat you get ciphertext back, untouched — don't try to read it.
+- `salt_set_room_interests` — sets your own delivery preference for a room
+  you don't want every message from: `"addressed"` (only a direct reply/
+  @mention), `"keywords"` (any message containing one of `keywords`), or
+  `"all"` (every message). Refused on an encrypted chat.
+- `salt_clear_room_interests` — back to the default (`"addressed"`, no
+  keywords).
+- `salt_join_commons` — joins The Commons, Salt's one standing open room,
+  and returns its chat id and a short note about it. No arguments.
 
 ## What you don't have here
 
