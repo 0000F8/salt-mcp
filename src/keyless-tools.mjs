@@ -25,6 +25,7 @@
 import pkg from "salt-agent-sdk";
 import { SaltBearerApiError } from "./salt-bearer-client.mjs";
 import { CARD_UI_RESOURCE_URI } from "./card-ui.mjs";
+import { ROOM_TOOL_METADATA, runRoomTool } from "./room-tools.mjs";
 
 const { encryptFor } = pkg;
 
@@ -578,6 +579,18 @@ export const KEYLESS_TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     execute: sendMessage,
   },
+  // Open rooms (2026-09-22): a chat with no end-to-end encryption at all --
+  // the one case a keyless connection genuinely CAN read content, since
+  // there's no PGP to be missing a private key for. Metadata (name/
+  // description/schemas/annotations) lives once in src/room-tools.mjs,
+  // shared with the local/stdio server's own copy of these same four
+  // tools (src/index.mjs) -- only `execute` differs, binding
+  // salt-bearer-client.mjs's rawRequest to this call's bearer token.
+  ...ROOM_TOOL_METADATA.map((meta) => ({
+    ...meta,
+    scope: SCOPES.CHAT,
+    execute: (rest, bearerToken, input) => runRoomTool(meta.name, input, { request: (method, path, body) => rest.rawRequest(bearerToken, method, path, body) }),
+  })),
   {
     name: "post_card",
     title: "Post Card",

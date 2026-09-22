@@ -23,6 +23,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import pkg from "salt-agent-sdk";
 import { toMcpTools } from "./annotations.mjs";
+import { createApiKeyRequest, toRoomMcpTools, runRoomTool, ROOM_TOOL_NAMES } from "./room-tools.mjs";
 
 const {
   loadSaltAgentConfig,
@@ -93,13 +94,22 @@ async function main() {
 
   const actions = createActions(buildActionsOptions(config, { client, identities }));
 
+  // Open rooms (2026-09-22): salt_read_room/salt_set_room_interests/
+  // salt_clear_room_interests/salt_join_commons aren't salt-agent-sdk
+  // actions (createActions doesn't cover rooms yet), so they're not on
+  // `actions` above -- see src/room-tools.mjs, shared with the hosted
+  // OAuth keyless catalog's own copy of these same four tools
+  // (src/keyless-tools.mjs). This identity's own api-key is the auth this
+  // surface has, same header createSaltClient sends everywhere else.
+  const roomRequest = createApiKeyRequest({ host: config.host, apiKey: caller.apiKey });
+
   const server = new Server(
     { name: "salt-mcp", version: PACKAGE_VERSION },
     { capabilities: { tools: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: toMcpTools(actions.definitions),
+    tools: [...toMcpTools(actions.definitions), ...toRoomMcpTools()],
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -108,7 +118,9 @@ async function main() {
       // No chat context in an MCP session -- depth 0, mainChatId null. Actions
       // that require a live chat (delegate_to_agent, post_card, hand_off_*)
       // will report that clearly rather than misbehave.
-      const result = await actions.execute(name, args ?? {}, caller, { depth: 0, mainChatId: null });
+      const result = ROOM_TOOL_NAMES.has(name)
+        ? await runRoomTool(name, args ?? {}, { request: roomRequest })
+        : await actions.execute(name, args ?? {}, caller, { depth: 0, mainChatId: null });
       const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
       return { content: [{ type: "text", text }] };
     } catch (err) {
@@ -121,7 +133,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log(`ready as agent #${config.saltAppId} (${config.host}); ${actions.definitions.length} tools exposed`);
+  log(`ready as agent #${config.saltAppId} (${config.host}); ${actions.definitions.length + ROOM_TOOL_NAMES.size} tools exposed`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

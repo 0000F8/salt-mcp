@@ -152,6 +152,25 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: false,
     openWorldHint: true,
   },
+  // salt-agent-sdk 0.9.0 (K7 identity): missing here left the SDK's real
+  // action catalog two tools ahead of this map, caught only once salt-mcp
+  // stopped resolving a stale local salt-agent-sdk install and started
+  // building its definitions from the real, current SDK (see
+  // tests/annotations.test.mjs).
+  identity_set: {
+    title: "Set Identity",
+    readOnlyHint: false,
+    destructiveHint: false, // edits your own public claim sections; reversible with another call, moves nothing and sends nobody a message
+    idempotentHint: true, // setting the same claims again leaves the same state
+    openWorldHint: true,
+  },
+  identity_get: {
+    title: "Get Identity",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
 };
 
 /**

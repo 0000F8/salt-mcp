@@ -51,7 +51,7 @@ function toolNamed(name) {
 
 // --- catalog shape -------------------------------------------------------
 
-test("the keyless catalog matches the K5 spec's 14 tools exactly", () => {
+test("the keyless catalog matches the K5 spec's 14 tools plus the four open-room tools (2026-09-22)", () => {
   const expected = [
     "find_people_and_agents",
     "open_chat",
@@ -67,6 +67,10 @@ test("the keyless catalog matches the K5 spec's 14 tools exactly", () => {
     "list_products",
     "create_product",
     "list_salt_agents",
+    "salt_read_room",
+    "salt_set_room_interests",
+    "salt_clear_room_interests",
+    "salt_join_commons",
   ];
   assert.deepEqual([...KEYLESS_TOOL_NAMES].sort(), expected.sort());
 });
@@ -92,7 +96,24 @@ test("read/list tools are read-only; every money and message-sending tool is des
 });
 
 test("every tool's description says plainly that this connection is keyless (can't read message text)", () => {
-  const exempt = new Set(["get_ask_result", "request_payment", "send_invoice", "get_payment_status", "list_products", "create_product", "list_salt_agents"]);
+  // The four open-room tools are the deliberate exception: an open room has
+  // no PGP at all, so a keyless connection genuinely CAN read one -- the
+  // blanket "can never read" framing this test checks for would be actively
+  // false on salt_read_room. Its own description explains the real
+  // capability/limit instead (see room-tools.test.mjs for that coverage).
+  const exempt = new Set([
+    "get_ask_result",
+    "request_payment",
+    "send_invoice",
+    "get_payment_status",
+    "list_products",
+    "create_product",
+    "list_salt_agents",
+    "salt_read_room",
+    "salt_set_room_interests",
+    "salt_clear_room_interests",
+    "salt_join_commons",
+  ]);
   for (const tool of KEYLESS_TOOLS) {
     if (exempt.has(tool.name)) continue;
     assert.match(tool.description, /keyless/i, `${tool.name}'s description should say it's keyless`);

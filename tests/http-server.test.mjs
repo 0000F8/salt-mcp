@@ -240,7 +240,7 @@ test("POST /mcp with a valid bearer token lists the keyless toolset and forwards
     await client.connect(transport);
 
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 14, "the full keyless catalog");
+    assert.equal(tools.length, 18, "the full keyless catalog (14 K5 tools + 4 open-room tools)");
     const postCardTool = tools.find((t) => t.name === "post_card");
     assert.equal(postCardTool._meta.ui.resourceUri, "ui://salt/card");
 
@@ -248,6 +248,57 @@ test("POST /mcp with a valid bearer token lists the keyless toolset and forwards
     assert.equal(result.isError, undefined);
     assert.deepEqual(result.structuredContent, { agents: [{ id: "a1", username: "faucet", display_name: "Faucet", category: "utility" }] });
     assert.equal(sawAuthHeader, "Bearer sat_abc123", "the exact bearer token was forwarded, unmodified");
+
+    await client.close();
+  } finally {
+    server.close();
+  }
+});
+
+test("the hosted keyless path can read an open room and join The Commons -- real HTTP, real bearer pass-through, no PGP anywhere", async () => {
+  const OPEN_CHAT_ID = "33333333-3333-3333-3333-333333333333";
+  const COMMONS_ID = "44444444-4444-4444-4444-444444444444";
+  const calls = [];
+  const fetchImpl = fakeSaltApi(
+    {
+      ...grantRoute(),
+      [`GET /api/v1/chats/${OPEN_CHAT_ID}`]: async () =>
+        json({
+          session: { id: OPEN_CHAT_ID, name: "Open Chat", public: true, encrypted: false, commons: false, member: false, member_count: 3 },
+          messages: [{ id: "m1", seq: 1, encrypted: false, message: "hello, open room", user: { id: "u1", username: "ada" } }],
+        }),
+      "GET /api/v1/config": async () => json({ commons_chat_id: COMMONS_ID }),
+      [`POST /api/v1/chats/${COMMONS_ID}/join_public`]: async () =>
+        json({ id: COMMONS_ID, name: "The Commons", commons_note: "Anyone can join. Say who you are." }),
+    },
+    calls
+  );
+  const app = createApp({ host: "https://fake-salt.test", fetchImpl });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const client = new Client({ name: "test-oauth-client", version: "0.0.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: "Bearer sat_abc123" } },
+    });
+    await client.connect(transport);
+
+    const read = await client.callTool({ name: "salt_read_room", arguments: { chat_id: OPEN_CHAT_ID } });
+    assert.equal(read.isError, undefined);
+    assert.equal(read.structuredContent.encrypted, false);
+    assert.equal(read.structuredContent.messages[0].text, "hello, open room");
+
+    const join = await client.callTool({ name: "salt_join_commons", arguments: {} });
+    assert.equal(join.isError, undefined);
+    assert.deepEqual(join.structuredContent, { chat_id: COMMONS_ID, name: "The Commons", note: "Anyone can join. Say who you are." });
+
+    // Every outbound call this connection made, including the room reads,
+    // carried the SAME bearer token -- rawRequest is just another path
+    // through salt-bearer-client.mjs's one `request`, not a second,
+    // unauthenticated escape hatch.
+    for (const call of calls) {
+      if (call.pathname.startsWith("/api/v1/oauth2/grant")) continue;
+      assert.equal(call.authHeader, "Bearer sat_abc123", `${call.method} ${call.pathname}`);
+    }
 
     await client.close();
   } finally {

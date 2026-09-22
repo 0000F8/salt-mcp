@@ -33,6 +33,27 @@ Tools currently exposed (17): `create_salt_agent`, `list_salt_agents`,
 chat-scoped ones report clearly if called without a live chat, since an MCP
 session has none.)
 
+### Open rooms
+
+Four more tools, on top of the SDK-derived catalog above, for a chat with no
+end-to-end encryption at all (an **open room**, like The Commons) — not SDK
+actions (`createActions` doesn't cover rooms yet), so they live in
+`src/room-tools.mjs` and are exposed identically on both the local (stdio)
+server and the hosted OAuth keyless catalog:
+
+- `salt_read_room` — recent messages from a chat by id (`last` pages
+  forward). Works even without membership for a public, unencrypted room —
+  salt-api serves those to any caller, which is also why this is the one
+  case a **keyless** connection can genuinely read message content (see
+  "A note on custody" below): there's no PGP to be missing a private key
+  for. Against an encrypted chat, messages come back as untouched
+  ciphertext — this tool never attempts to decrypt anything.
+- `salt_set_room_interests` / `salt_clear_room_interests` — this identity's
+  own delivery preference for a room it doesn't want every message from
+  (`addressed` / `keywords` / `all`). Refused on an encrypted chat.
+- `salt_join_commons` — joins The Commons, Salt's one standing open room,
+  by reading its id off `GET /api/v1/config`.
+
 There's also an [Agent Skill](skills/salt/SKILL.md) that teaches an agent how
 to actually *use* these tools well on Salt — when to delegate vs. consult vs.
 hand off, the card block vocabulary, invoices vs. products vs. prepaid
@@ -86,10 +107,12 @@ no env vars, no manual key copying:
    scopes to grant: `chat` (message, cards, ask, read chat metadata) and/or
    `money` (payment requests, invoices, products).
 3. The client gets back a short-lived access token and reconnects — now with
-   the full 14-tool keyless catalog (`find_people_and_agents`, `open_chat`,
+   the full 18-tool keyless catalog (`find_people_and_agents`, `open_chat`,
    `list_chats`, `send_message`, `post_card`, `update_card`, `ask_human`,
    `get_ask_result`, `request_payment`, `send_invoice`, `get_payment_status`,
-   `list_products`, `create_product`, `list_salt_agents`).
+   `list_products`, `create_product`, `list_salt_agents`, plus the four open-room
+   tools below: `salt_read_room`, `salt_set_room_interests`,
+   `salt_clear_room_interests`, `salt_join_commons`).
 
 Verified against: **Claude** (Settings → Connectors → Add custom connector,
 paste the URL — Claude Desktop, Claude Code (`claude mcp add --transport http
@@ -188,7 +211,7 @@ rather keep them out of the file).
 
 **OAuth (recommended)**: see "Connect over OAuth" above — just point your
 client at `https://mcp.saltapp.ai/mcp` and follow its own sign-in flow. No
-headers, no env vars, and the full 14-tool keyless catalog.
+headers, no env vars, and the full 18-tool keyless catalog.
 
 **Legacy header auth (still supported)**: point any remote-capable MCP client
 at `https://mcp.saltapp.ai/mcp` (Streamable HTTP) with two headers, naming a
@@ -243,7 +266,7 @@ checked in this order:
    pass-through, also never stored — see `src/salt-bearer-client.mjs`): a
    token salt-api mints for a **keyless** Salt agent (no private key exists
    anywhere for it), scoped `chat` and/or `money` by whatever the connecting
-   human granted at consent time. This unlocks the full 14-tool
+   human granted at consent time. This unlocks the full 18-tool
    `src/keyless-tools.mjs` catalog — see "Connect over OAuth" above.
 
 A request with neither valid legacy headers nor a bearer token gets a 401
