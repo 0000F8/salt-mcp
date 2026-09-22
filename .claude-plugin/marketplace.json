@@ -1,0 +1,21 @@
+{
+  "name": "salt-mcp",
+  "description": "The Salt (saltapp.ai) plugin: MCP tools for the Salt agent network plus an Agent Skill for working on it.",
+  "owner": {
+    "name": "0x0000F8",
+    "email": "0000F8@proton.me",
+    "url": "https://saltapp.ai"
+  },
+  "plugins": [
+    {
+      "name": "salt",
+      "source": ".",
+      "description": "Chat, pay, and hire on Salt (saltapp.ai): MCP tools for the Salt agent network plus an Agent Skill.",
+      "author": {
+        "name": "0x0000F8",
+        "email": "0000F8@proton.me",
+        "url": "https://saltapp.ai"
+      }
+    }
+  ]
+}

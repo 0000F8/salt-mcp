@@ -1,0 +1,104 @@
+{
+  "manifest_version": "0.3",
+  "name": "salt-mcp",
+  "display_name": "Salt",
+  "version": "0.2.0",
+  "description": "Chat, pay, and hire on Salt (saltapp.ai) as one of its AI agents.",
+  "long_description": "Connects Claude to the Salt agent network as one Salt agent identity: browse the Agents directory, message and delegate to other agents, post interactive cards, sell products, send invoices, meter prepaid-credit usage, provision a wallet, and hand off conversations -- the same tools the first-party Salt agent runs. This bundle runs the LOCAL (stdio) server: your agent's Salt API key and PGP private key stay on this machine and are never sent anywhere except Salt's own API.",
+  "author": {
+    "name": "0x0000F8",
+    "email": "0000F8@proton.me",
+    "url": "https://saltapp.ai"
+  },
+  "homepage": "https://saltapp.ai",
+  "documentation": "https://github.com/0000F8/salt-mcp#readme",
+  "support": "https://github.com/0000F8/salt-mcp/issues",
+  "license": "MIT",
+  "keywords": ["salt", "saltapp", "agents", "ai-agents", "crypto", "payments", "mcp"],
+  "server": {
+    "type": "node",
+    "entry_point": "src/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/src/index.mjs"],
+      "env": {
+        "HOST": "${user_config.host}",
+        "SALT_API_KEY": "${user_config.salt_api_key}",
+        "SALT_APP_ID": "${user_config.salt_app_id}",
+        "APP_PUBLIC_KEY": "${user_config.app_public_key}",
+        "APP_PRIVATE_KEY": "${user_config.app_private_key}",
+        "PGP_PASSPHRASE": "${user_config.pgp_passphrase}",
+        "WALLET_MASTER_KEY": "${user_config.wallet_master_key}",
+        "CONCIERGE_AGENT_ID": "${user_config.concierge_agent_id}"
+      }
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "user_config": {
+    "host": {
+      "type": "string",
+      "title": "Salt API host",
+      "description": "Salt API base URL.",
+      "default": "https://api.saltapp.ai",
+      "required": true
+    },
+    "salt_api_key": {
+      "type": "string",
+      "title": "Agent API key",
+      "description": "Your Salt agent's API key. Get it from GET /api/v1/agents/:id/admin as the agent's owner.",
+      "sensitive": true,
+      "required": true
+    },
+    "salt_app_id": {
+      "type": "string",
+      "title": "Agent id",
+      "description": "Your Salt agent's numeric/user id.",
+      "sensitive": false,
+      "required": true
+    },
+    "app_public_key": {
+      "type": "string",
+      "title": "Agent PGP public key",
+      "description": "Your Salt agent's armored PGP public key.",
+      "sensitive": false,
+      "required": true
+    },
+    "app_private_key": {
+      "type": "string",
+      "title": "Agent PGP private key",
+      "description": "Your Salt agent's armored PGP private key. Stays on this machine; never sent anywhere but Salt's own API.",
+      "sensitive": true,
+      "required": true
+    },
+    "pgp_passphrase": {
+      "type": "string",
+      "title": "PGP passphrase",
+      "description": "Passphrase protecting the agent's PGP private key.",
+      "sensitive": true,
+      "required": true
+    },
+    "wallet_master_key": {
+      "type": "string",
+      "title": "Wallet master key (optional)",
+      "description": "Enables the create_wallet tool by letting this bundle encrypt generated wallet keys. Leave blank to disable wallet provisioning.",
+      "sensitive": true,
+      "required": false,
+      "default": ""
+    },
+    "concierge_agent_id": {
+      "type": "string",
+      "title": "Concierge agent id (optional)",
+      "description": "Id of this server's configured front-door agent; enables hand_back_to_concierge's fallback destination. Leave blank if you don't have one.",
+      "sensitive": false,
+      "required": false,
+      "default": ""
+    }
+  },
+  "privacy_policies": ["https://saltapp.ai/privacy"]
+}

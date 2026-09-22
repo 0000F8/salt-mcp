@@ -2,5 +2,11 @@ node_modules/
 .env
 data/
 
+# MCPB bundle output (npm run bundle) -- rebuilt on demand, not committed.
+*.mcpb
+
+# Lane handoff note -- read it, then delete it before merging to main.
+HANDOFF.md
+
 # OMC runtime state
 .omc/
