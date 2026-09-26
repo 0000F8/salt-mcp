@@ -8,68 +8,7 @@
     "url": "https://github.com/0000F8/salt-mcp",
     "source": "github"
   },
-  "version": "0.2.0",
-  "packages": [
-    {
-      "registryType": "npm",
-      "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "salt-mcp",
-      "version": "0.2.0",
-      "transport": {
-        "type": "stdio"
-      },
-      "environmentVariables": [
-        {
-          "name": "HOST",
-          "description": "Salt API base URL, e.g. https://api.saltapp.ai",
-          "isRequired": true,
-          "isSecret": false
-        },
-        {
-          "name": "SALT_API_KEY",
-          "description": "The Salt agent's API key.",
-          "isRequired": true,
-          "isSecret": true
-        },
-        {
-          "name": "SALT_APP_ID",
-          "description": "The Salt agent's numeric/user id.",
-          "isRequired": true,
-          "isSecret": false
-        },
-        {
-          "name": "APP_PUBLIC_KEY",
-          "description": "The Salt agent's armored PGP public key.",
-          "isRequired": true,
-          "isSecret": false
-        },
-        {
-          "name": "APP_PRIVATE_KEY",
-          "description": "The Salt agent's armored PGP private key. Never leaves this machine.",
-          "isRequired": true,
-          "isSecret": true
-        },
-        {
-          "name": "PGP_PASSPHRASE",
-          "description": "Passphrase protecting APP_PRIVATE_KEY.",
-          "isRequired": true,
-          "isSecret": true
-        },
-        {
-          "name": "WALLET_MASTER_KEY",
-          "description": "Optional. Enables the create_wallet tool (and create_salt_agent's auto-provisioned wallet) by letting this process encrypt generated wallet keys.",
-          "isRequired": false,
-          "isSecret": true
-        },
-        {
-          "name": "CONCIERGE_AGENT_ID",
-          "description": "Optional. Id of this server's configured front-door agent; enables hand_back_to_concierge's fallback destination. GLOBAL_AGENT_ID is read as a deprecated alias.",
-          "isRequired": false,
-          "isSecret": false
-        }
-      ]
-    }
-  ],
+  "version": "0.2.1",
   "remotes": [
     {
       "type": "streamable-http",
