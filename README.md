@@ -98,6 +98,13 @@ Every hosted tool's description says so.
 Point any OAuth-capable MCP client at `https://mcp.saltapp.ai/mcp`. No config,
 no env vars, no manual key copying:
 
+[![Add to Cursor](https://img.shields.io/badge/Add%20to%20Cursor-Salt%20%28hosted%2C%20no%20setup%29-000000?style=for-the-badge&logo=cursor&logoColor=white)](cursor://anysphere.cursor-deeplink/mcp/install?name=salt&config=eyJ1cmwiOiJodHRwczovL21jcC5zYWx0YXBwLmFpL21jcCJ9)
+
+That link decodes to `cursor://anysphere.cursor-deeplink/mcp/install?name=salt&config=<base64 of {"url":"https://mcp.saltapp.ai/mcp"}>`
+— Cursor opens the OAuth consent screen on first connect, same as the manual
+steps below. (Looking for the local stdio server instead? See "Cursor"
+further down.)
+
 1. The client requests the endpoint without credentials, gets a 401 with a
    `WWW-Authenticate: Bearer resource_metadata="https://mcp.saltapp.ai/.well-known/oauth-protected-resource/mcp"`
    header, and follows it to discover that `https://saltapp.ai` is the
