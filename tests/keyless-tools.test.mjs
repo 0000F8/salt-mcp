@@ -565,6 +565,13 @@ test("runKeylessTool refuses an unknown tool name", async () => {
 // `args`/`input` -- exactly the boundary that keeps a real MCP client from
 // ever setting it (src/http.mjs's one real call site never populates it).
 // See keyless-tools.mjs's runKeylessTool doc comment.
+//
+// Every `rest.getCard` mock below returns `{ interactions: [...] }`
+// (salt-api 0.96.0's `GET /api/v1/cards/:id` shape, newest first) --
+// polling THIS card directly, never the old shared socket-mode outbox
+// (`GET /api/v1/agent/updates`), is the whole point of this file's
+// rewrite: see keyless-tools.mjs's pollForCardInteraction doc comment for
+// why the outbox's one-cursor-per-agent design could strand an ask.
 
 test("ask_human posts a card with one restricted_to button per option, then resolves the matching tap", async () => {
   let postedBlocks;
@@ -576,13 +583,9 @@ test("ask_human posts a card with one restricted_to button per option, then reso
       postedBlocks = blocks;
       return { resource_id: CARD_ID };
     },
-    async agentUpdates() {
-      return {
-        updates: [
-          { id: 5, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_1", value: "", user: { id: HUMAN_ID } }) },
-        ],
-        cursor: 5,
-      };
+    async getCard(token, cardId) {
+      assert.equal(cardId, CARD_ID);
+      return { interactions: [{ id: "i5", action_id: "opt_1", value: "", user_id: HUMAN_ID }] };
     },
   };
   const result = await runKeylessTool(
@@ -597,7 +600,7 @@ test("ask_human posts a card with one restricted_to button per option, then reso
   assert.equal(typeof result.ask_id, "string");
 });
 
-test("ask_human ignores a card_interaction for a different card_id", async () => {
+test("ask_human ignores a card_interaction whose action_id isn't one of this ask's own option buttons", async () => {
   const rest = {
     async getChat() {
       return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
@@ -605,20 +608,63 @@ test("ask_human ignores a card_interaction for a different card_id", async () =>
     async postCard() {
       return { resource_id: CARD_ID };
     },
-    async agentUpdates() {
-      return {
-        updates: [{ id: 1, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID_2, action_id: "opt_0" }) }],
-        cursor: 1,
-      };
+    async getCard() {
+      // A real interaction landed on this card, but its action_id isn't
+      // one of THIS ask's opt_0.. buttons -- must not be mistaken for the
+      // answer.
+      return { interactions: [{ id: 1, action_id: "some_unrelated_action" }] };
     },
   };
   const result = await runKeylessTool(
     "ask_human",
     { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["A", "B"] },
-    { rest, bearerToken: "tok", maxTotalMsOverride: 15 }
+    { rest, bearerToken: "tok", maxTotalMsOverride: 15, minEmptyPollMsOverride: 2 }
   );
   assert.equal(result.status, "pending");
   assert.equal(result.answer, undefined);
+});
+
+test("two concurrent asks for one agent each get their OWN answer -- the shared-outbox-cursor bug this fixes", async () => {
+  // Before this fix, ask_human/get_ask_result drained the shared
+  // socket-mode outbox (GET /api/v1/agent/updates), which has exactly ONE
+  // forward-only cursor per agent -- so two asks running at once for the
+  // same agent, filtering by card_id only to decide what to RETURN, could
+  // each advance the other's cursor past its own answer and strand it.
+  // Polling by card id means each ask reads only ITS OWN card, and this
+  // test proves that by wiring the fake API to serve two distinct cards
+  // whose answers would be wrong if either ask read the other's.
+  const cardForQuestion = { "Pizza?": CARD_ID, "Color?": CARD_ID_2 };
+  const interactionsByCard = {
+    [CARD_ID]: [{ id: "i1", action_id: "opt_1" }], // "No"
+    [CARD_ID_2]: [{ id: "i2", action_id: "opt_0" }], // "Red"
+  };
+  const rest = {
+    async getChat() {
+      return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
+    },
+    async postCard(token, chatId, blocks, text) {
+      const cardId = cardForQuestion[text];
+      assert.ok(cardId, `unexpected question text: ${text}`);
+      return { resource_id: cardId };
+    },
+    async getCard(token, cardId) {
+      return { interactions: interactionsByCard[cardId] };
+    },
+  };
+  const [pizza, color] = await Promise.all([
+    runKeylessTool(
+      "ask_human",
+      { chat_id: CHAT_ID, to: "dan", question: "Pizza?", options: ["Yes", "No"] },
+      { rest, bearerToken: "tok", maxTotalMsOverride: 20 }
+    ),
+    runKeylessTool(
+      "ask_human",
+      { chat_id: CHAT_ID, to: "dan", question: "Color?", options: ["Red", "Blue"] },
+      { rest, bearerToken: "tok", maxTotalMsOverride: 20 }
+    ),
+  ]);
+  assert.equal(pizza.answer, "No", "the pizza ask must resolve from CARD_ID, never CARD_ID_2");
+  assert.equal(color.answer, "Red", "the color ask must resolve from CARD_ID_2, never CARD_ID");
 });
 
 test("ask_human returns {status: 'pending', ask_id} when nobody has answered within its time budget", async () => {
@@ -629,8 +675,8 @@ test("ask_human returns {status: 'pending', ask_id} when nobody has answered wit
     async postCard() {
       return { resource_id: CARD_ID };
     },
-    async agentUpdates() {
-      return { updates: [], cursor: 0 };
+    async getCard() {
+      return { interactions: [] };
     },
   };
   const result = await runKeylessTool(
@@ -658,16 +704,13 @@ test("ask_human's polling budget cannot be set from tool arguments -- only from 
     async postCard() {
       return { resource_id: CARD_ID };
     },
-    async agentUpdates() {
+    async getCard() {
       pollCount += 1;
       // Answers on the very first poll -- so this resolves fast
       // regardless of the (huge, real) production budget, proving the
       // request-shaped `_maxTotalMs` argument below did nothing rather
       // than shrinking the budget to something suspiciously small.
-      return {
-        updates: [{ id: 1, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }],
-        cursor: 1,
-      };
+      return { interactions: [{ id: 1, action_id: "opt_0" }] };
     },
   };
   const result = await runKeylessTool(
@@ -707,8 +750,12 @@ test("get_ask_result resumes from a pending ask_id and resolves once the tap lan
         async postCard() {
           return { resource_id: CARD_ID };
         },
-        async agentUpdates() {
-          return { updates: [], cursor: 3 };
+        async getCard() {
+          // A stray, non-matching interaction (not one of this ask's own
+          // option buttons) -- proves the cursor advances past it even
+          // though it isn't the answer, and that get_ask_result resumes
+          // from exactly that point rather than from the beginning.
+          return { interactions: [{ id: "stray-3", action_id: "not_an_option" }] };
         },
       },
       bearerToken: "tok",
@@ -719,12 +766,10 @@ test("get_ask_result resumes from a pending ask_id and resolves once the tap lan
   assert.equal(pendingAsk.status, "pending");
 
   const rest = {
-    async agentUpdates(token, { after }) {
-      assert.equal(after, 3, "get_ask_result resumes from the cursor the pending ask left off at");
-      return {
-        updates: [{ id: 4, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }],
-        cursor: 4,
-      };
+    async getCard(token, cardId, { after }) {
+      assert.equal(cardId, CARD_ID);
+      assert.equal(after, "stray-3", "get_ask_result resumes from the newest interaction id the pending ask already saw");
+      return { interactions: [{ id: "tap-4", action_id: "opt_0" }] };
     },
   };
   const resolved = await runKeylessTool("get_ask_result", { ask_id: pendingAsk.ask_id }, { rest, bearerToken: "tok" });
@@ -735,6 +780,45 @@ test("get_ask_result refuses a malformed ask_id", async () => {
   await assert.rejects(() => runKeylessTool("get_ask_result", { ask_id: "not-base64-json" }, { rest: {}, bearerToken: "tok" }), /isn't valid or has expired/);
 });
 
+test("get_ask_result still resolves even with a corrupt or unrecognised `after` cursor in its ask_id", async () => {
+  // Simulates a stale/foreign ask_id whose `after` isn't a real
+  // interaction id on this card (e.g. carried over from a different
+  // scheme, or hand-crafted) -- salt-api's route fails OPEN on an
+  // unrecognised `after` (the full list, never a 500), and this client
+  // forwards whatever `after` it's given as-is, never validating it
+  // itself.
+  const askId = Buffer.from(
+    JSON.stringify({ cardId: CARD_ID, actionMap: { opt_0: "Yes", opt_1: "No" }, after: "not-a-real-interaction-id" }),
+    "utf8"
+  ).toString("base64url");
+  const rest = {
+    async getCard(token, cardId, { after }) {
+      assert.equal(cardId, CARD_ID);
+      assert.equal(after, "not-a-real-interaction-id", "the corrupt cursor is forwarded as-is, never validated client-side");
+      return { interactions: [{ id: "tap-1", action_id: "opt_1" }] };
+    },
+  };
+  const result = await runKeylessTool("get_ask_result", { ask_id: askId }, { rest, bearerToken: "tok" });
+  assert.equal(result.answer, "No");
+});
+
+test("a pay-tap answer carries transfer_request_id and its live transfer_request_status", async () => {
+  const askId = Buffer.from(JSON.stringify({ cardId: CARD_ID, actionMap: { opt_0: "Pay now" }, after: null }), "utf8").toString("base64url");
+  const rest = {
+    async getCard() {
+      return {
+        interactions: [
+          { id: "tap-9", action_id: "opt_0", transfer_request_id: REQUEST_ID, transfer_request_status: "Pending" },
+        ],
+      };
+    },
+  };
+  const result = await runKeylessTool("get_ask_result", { ask_id: askId }, { rest, bearerToken: "tok" });
+  assert.equal(result.answer, "Pay now");
+  assert.equal(result.transfer_request_id, REQUEST_ID);
+  assert.equal(result.transfer_request_status, "Pending");
+});
+
 test("get_ask_result's polling budget also cannot be set from tool arguments", async () => {
   const pendingAsk = await runKeylessTool(
     "ask_human",
@@ -743,7 +827,7 @@ test("get_ask_result's polling budget also cannot be set from tool arguments", a
       rest: {
         async getChat() { return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } }; },
         async postCard() { return { resource_id: CARD_ID }; },
-        async agentUpdates() { return { updates: [], cursor: 1 }; },
+        async getCard() { return { interactions: [] }; },
       },
       bearerToken: "tok",
       maxTotalMsOverride: 5,
@@ -752,9 +836,9 @@ test("get_ask_result's polling budget also cannot be set from tool arguments", a
   );
   let pollCount = 0;
   const rest = {
-    async agentUpdates() {
+    async getCard() {
       pollCount += 1;
-      return { updates: [{ id: 2, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_1" }) }], cursor: 2 };
+      return { interactions: [{ id: 2, action_id: "opt_1" }] };
     },
   };
   const result = await runKeylessTool("get_ask_result", { ask_id: pendingAsk.ask_id, _maxTotalMs: 999999999 }, { rest, bearerToken: "tok" });
@@ -762,11 +846,40 @@ test("get_ask_result's polling budget also cannot be set from tool arguments", a
   assert.equal(pollCount, 1);
 });
 
+test("neither ask_human nor get_ask_result ever calls the old socket-mode outbox endpoint", async () => {
+  const calls = [];
+  const rest = {
+    async getChat() {
+      return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
+    },
+    async postCard() {
+      return { resource_id: CARD_ID };
+    },
+    async getCard(token, cardId, opts) {
+      calls.push({ method: "getCard", cardId, opts });
+      return { interactions: [{ id: 1, action_id: "opt_0" }] };
+    },
+    async agentUpdates() {
+      calls.push({ method: "agentUpdates" });
+      throw new Error("agentUpdates must never be called by ask_human/get_ask_result any more");
+    },
+  };
+  const result = await runKeylessTool(
+    "ask_human",
+    { chat_id: CHAT_ID, to: "dan", question: "Q?", options: ["A", "B"] },
+    { rest, bearerToken: "tok", maxTotalMsOverride: 20 }
+  );
+  assert.equal(result.answer, "A");
+  const askId = Buffer.from(JSON.stringify({ cardId: CARD_ID, actionMap: { opt_0: "A" }, after: null }), "utf8").toString("base64url");
+  await runKeylessTool("get_ask_result", { ask_id: askId }, { rest, bearerToken: "tok" });
+  assert.ok(calls.every((c) => c.method === "getCard"), `expected only getCard calls, got: ${JSON.stringify(calls.map((c) => c.method))}`);
+});
+
 // --- pollForCardInteraction: signal/abort and budget -----------------------
 
 test("pollForCardInteraction stops within its wall-clock budget when nothing ever matches", async () => {
   let calls = 0;
-  const rest = { async agentUpdates() { calls += 1; return { updates: [], cursor: 0 }; } };
+  const rest = { async getCard() { calls += 1; return { interactions: [] }; } };
   const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 15, minEmptyPollMs: 2 });
   assert.equal(result.found, false);
   assert.ok(calls >= 1);
@@ -774,7 +887,7 @@ test("pollForCardInteraction stops within its wall-clock budget when nothing eve
 
 test("pollForCardInteraction stops immediately when its AbortSignal is already aborted", async () => {
   let calls = 0;
-  const rest = { async agentUpdates() { calls += 1; return { updates: [], cursor: 0 }; } };
+  const rest = { async getCard() { calls += 1; return { interactions: [] }; } };
   const controller = new AbortController();
   controller.abort();
   const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 50_000, signal: controller.signal });
@@ -786,10 +899,10 @@ test("pollForCardInteraction stops after the signal aborts mid-poll, without wai
   let calls = 0;
   const controller = new AbortController();
   const rest = {
-    async agentUpdates() {
+    async getCard() {
       calls += 1;
       if (calls === 1) controller.abort(); // simulates the client disconnecting after the first round-trip
-      return { updates: [], cursor: 0 };
+      return { interactions: [] };
     },
   };
   const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 50_000, signal: controller.signal });
@@ -802,9 +915,9 @@ test("pollForCardInteraction stops after the signal aborts mid-poll, without wai
 test("an empty poll that returns instantly is still followed by at least minEmptyPollMs before the next round -- salt-api's own pacing is never the only guard", async () => {
   const calls = [];
   const rest = {
-    async agentUpdates() {
+    async getCard() {
       calls.push(Date.now());
-      return { updates: [], cursor: 0 }; // answers instantly, no updates at all
+      return { interactions: [] }; // answers instantly, no interactions at all
     },
   };
   const start = Date.now();
@@ -816,31 +929,31 @@ test("an empty poll that returns instantly is still followed by at least minEmpt
   assert.ok(Date.now() - start >= 25);
 });
 
-test("a poll that returns REAL updates (even non-matching ones) is not held back by the empty-poll floor", async () => {
+test("a poll that returns REAL interactions (even non-matching ones) is not held back by the empty-poll floor", async () => {
   let calls = 0;
   const rest = {
-    async agentUpdates() {
+    async getCard() {
       calls += 1;
-      // Not empty -- there IS an update, it just isn't for our card.
-      return { updates: [{ id: calls, event: "card_interaction", body: JSON.stringify({ card_id: "some-other-card", action_id: "opt_0" }) }], cursor: calls };
+      // Not empty -- there IS an interaction, it just never matches.
+      return { interactions: [{ id: calls, action_id: "opt_0" }] };
     },
   };
   const start = Date.now();
-  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 40, minEmptyPollMs: 5_000 });
+  const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 40, minEmptyPollMs: 5_000, matches: () => false });
   assert.equal(result.found, false);
   assert.ok(calls >= 3, `expected several fast rounds within the 40ms budget, got ${calls}`);
   assert.ok(Date.now() - start < 5_000, "a 5s empty-poll floor must never apply when the response wasn't actually empty");
 });
 
-test("a 429 from agentUpdates is retried after Retry-After, not treated as fatal and not retried immediately", async () => {
+test("a 429 from getCard is retried after Retry-After, not treated as fatal and not retried immediately", async () => {
   const calls = [];
   const rest = {
-    async agentUpdates() {
+    async getCard() {
       calls.push(Date.now());
       if (calls.length === 1) {
-        throw new SaltBearerApiError("GET", "/api/v1/agent/updates", 429, { error: "slow down" }, 1); // retryAfterSeconds: 1
+        throw new SaltBearerApiError("GET", "/api/v1/cards/x", 429, { error: "slow down" }, 1); // retryAfterSeconds: 1
       }
-      return { updates: [{ id: 9, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }], cursor: 9 };
+      return { interactions: [{ id: 9, action_id: "opt_0" }] };
     },
   };
   const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 5_000 });
@@ -852,13 +965,13 @@ test("a 429 from agentUpdates is retried after Retry-After, not treated as fatal
 test("a 429 with no Retry-After still backs off (defaults to 1s) rather than retrying immediately", async () => {
   const calls = [];
   const rest = {
-    async agentUpdates() {
+    async getCard() {
       calls.push(Date.now());
-      if (calls.length === 1) throw new SaltBearerApiError("GET", "/api/v1/agent/updates", 429, { error: "slow down" }, undefined);
+      if (calls.length === 1) throw new SaltBearerApiError("GET", "/api/v1/cards/x", 429, { error: "slow down" }, undefined);
       // Resolves on the second call so the loop ends there -- this test
       // is only about the SPACING before that call, not about how many
       // more empty rounds would otherwise follow.
-      return { updates: [{ id: 1, event: "card_interaction", body: JSON.stringify({ card_id: CARD_ID, action_id: "opt_0" }) }], cursor: 1 };
+      return { interactions: [{ id: 1, action_id: "opt_0" }] };
     },
   };
   const result = await pollForCardInteraction(rest, "tok", { cardId: CARD_ID, maxTotalMs: 5_000 });
@@ -871,13 +984,13 @@ test("an aborted signal cuts a Retry-After wait short instead of waiting it out"
   const controller = new AbortController();
   let calls = 0;
   const rest = {
-    async agentUpdates() {
+    async getCard() {
       calls += 1;
       if (calls === 1) {
         setTimeout(() => controller.abort(), 5);
-        throw new SaltBearerApiError("GET", "/api/v1/agent/updates", 429, {}, 30); // a 30s Retry-After
+        throw new SaltBearerApiError("GET", "/api/v1/cards/x", 429, {}, 30); // a 30s Retry-After
       }
-      return { updates: [], cursor: 0 };
+      return { interactions: [] };
     },
   };
   const start = Date.now();

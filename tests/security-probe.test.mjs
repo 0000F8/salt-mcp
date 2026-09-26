@@ -31,8 +31,10 @@ function fakeSaltApi(routes, calls) {
     const method = (init.method || "GET").toUpperCase();
     const authHeader = init.headers?.Authorization ?? init.headers?.authorization;
     if (calls) calls.push({ method, url: `${pathname}${search}`, auth: (authHeader || "").slice(0, 12) });
-    if (pathname.includes("/agent/updates")) return json({ updates: [], cursor: 0 });
     if (pathname.startsWith("/api/v1/chats/")) return json({ id: "c1", session: { users: [{ id: "h1", username: "ada" }] } });
+    // Covers both POST /api/v1/cards (create) and GET /api/v1/cards/:id
+    // (ask_human's/get_ask_result's poll, salt-api 0.96.0) -- no
+    // `interactions` here means every poll below sees an empty card.
     if (pathname.startsWith("/api/v1/cards")) return json({ id: "m1", resource_id: "card1" });
     const handler = routes[`${method} ${pathname}`];
     if (handler) return handler({ authHeader });
@@ -139,8 +141,9 @@ test("probe finding 4 (fixed): a client-supplied _maxTotalMs does nothing -- ask
   const { server, baseUrl } = await listen(app);
   try {
     // Note: this deliberately does NOT wait for the call to resolve (that
-    // would take the real ~50s budget, since this mock's /agent/updates
-    // never answers with a match) -- it only asserts that the argument is
+    // would take the real ~50s budget, since this mock's GET
+    // /api/v1/cards/:id never answers with a matching interaction) -- it
+    // only asserts that the argument is
     // accepted by transport/schema validation (chat_id/to/question/options
     // are all present and valid) without altering server-side behavior,
     // which is exactly what "the argument does nothing" means: there is

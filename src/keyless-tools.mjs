@@ -72,6 +72,27 @@ function assertPlainId(value, field) {
   return s;
 }
 
+/**
+ * Builds ask_human's/get_ask_result's `{answer, ...}` payload from one
+ * matched card interaction. `transfer_request_id`/`transfer_request_status`
+ * ride along when the interaction carries them -- salt-api's
+ * GET /api/v1/cards/:id only sets them on a pay tap, live status included
+ * (see the route's contract), which is genuinely new information the old
+ * socket-outbox event body never carried. ask_human's own cards are plain
+ * option buttons today, never `type: "pay"`, so this is normally a no-op;
+ * it costs nothing to pass through and saves the next card type that
+ * reuses this poll from needing its own answer-shaping code.
+ */
+function answerFromInteraction(actionMap, interaction) {
+  const answer = actionMap[interaction.action_id] ?? interaction.value ?? interaction.action_id;
+  const result = { answer };
+  if (interaction.transfer_request_id) {
+    result.transfer_request_id = interaction.transfer_request_id;
+    result.transfer_request_status = interaction.transfer_request_status;
+  }
+  return result;
+}
+
 function findMemberByHandle(members, handle) {
   const needle = String(handle || "").trim().toLowerCase().replace(/^@/, "");
   return (Array.isArray(members) ? members : []).find((m) => String(m.username || "").toLowerCase() === needle);
@@ -149,12 +170,13 @@ const GET_ASK_RESULT_MAX_MS = 2_000;
 // poll" contract has salt-api wait up to ~2s server-side when there's
 // nothing new, which normally paces this loop for free -- but nothing
 // stops a fast/cached/misbehaving response from coming back with
-// `updates: []` in a few milliseconds, and without a floor of our own
-// this loop would then spin as fast as the network round-trip allows,
-// hammering salt-api far harder than the K2 contract's own pacing
-// intends. Only applies when a poll comes back with NO updates at all
-// (not just none matching this card) -- any real updates are a sign of
-// real activity, worth checking again for promptly.
+// `interactions: []` in a few milliseconds, and without a floor of our
+// own this loop would then spin as fast as the network round-trip
+// allows, hammering salt-api far harder than the K2 contract's own
+// pacing intends. Only applies when a poll comes back with NO
+// interactions at all (not just none matching `matches`) -- any real
+// interaction is a sign of real activity, worth checking again for
+// promptly.
 const MIN_EMPTY_POLL_MS = 1_000;
 
 /** Interruptible sleep -- resolves early (never rejects) if `signal` aborts mid-wait. */
@@ -167,25 +189,48 @@ function sleep(ms, signal) {
 }
 
 /**
- * Short-polls the socket-mode outbox (K2 contract,
- * GET /api/v1/agent/updates) for a card_interaction on `cardId`, up to
- * `maxTotalMs` of wall time (always one of the two constants above in
- * production; tests pass their own small budgets directly to this
- * exported function, never through a tool argument). `signal` (an
- * AbortSignal) stops the loop early -- wired in src/http.mjs to the
- * underlying HTTP request's own `res.on("close")`, so a client that hangs
- * up mid-ask_human doesn't leave this server polling salt-api for up to
- * another 50s on its behalf.
+ * Short-polls ONE card's own interaction log (salt-api 0.96.0,
+ * GET /api/v1/cards/:id) for an interaction matching `matches` (any
+ * interaction at all, when `matches` is omitted), up to `maxTotalMs` of
+ * wall time (always one of the two constants above in production; tests
+ * pass their own small budgets directly to this exported function, never
+ * through a tool argument). `signal` (an AbortSignal) stops the loop
+ * early -- wired in src/http.mjs to the underlying HTTP request's own
+ * `res.on("close")`, so a client that hangs up mid-ask_human doesn't
+ * leave this server polling salt-api for up to another 50s on its
+ * behalf.
+ *
+ * This reads the CARD directly, never the shared socket-mode outbox
+ * (GET /api/v1/agent/updates) the previous version of this function
+ * drained. That outbox has exactly ONE forward-only cursor PER AGENT
+ * (design-fleet/runs/2026-09-17-distribution/FOLLOWUPS.md): two
+ * concurrent asks for the same agent, or an ask running beside any other
+ * listener on the same outbox, consumed each other's answers and could
+ * strand an ask forever, because draining the outbox for one card's
+ * interaction also advanced the cursor past every OTHER row it read.
+ * Reading one card by id is idempotent and shares nothing with any other
+ * ask -- two asks on the same agent now each poll their own card and
+ * never touch each other's cursor.
+ *
+ * `after` is an interaction id (never a numeric outbox offset); passed
+ * straight through to `rest.getCard`, which forwards it as the `after`
+ * query param salt-api compares interactions against (an unrecognised
+ * value fails OPEN server-side -- the full list, never a 500 -- so a
+ * stale or corrupt cursor degrades to "reread everything" rather than
+ * erroring).
  *
  * Two pacing guards, both from the 2026-09-19 availability review: an
- * empty poll (no updates at all) is followed by a sleep long enough to
- * make that iteration take at least `minEmptyPollMs` in total (see
- * MIN_EMPTY_POLL_MS's comment for why); a 429 from `rest.agentUpdates`
- * (this server's OWN per-IP limiter, or salt-api's) is honoured via
- * `err.retryAfterSeconds` (see SaltBearerApiError/salt-bearer-client.mjs)
- * rather than being retried immediately or treated as fatal.
+ * empty poll (no interactions at all) is followed by a sleep long enough
+ * to make that iteration take at least `minEmptyPollMs` in total (see
+ * MIN_EMPTY_POLL_MS's comment for why) -- note this is about the response
+ * being literally empty, not about nothing MATCHING `matches`, since a
+ * card with real (non-matching) activity is a sign of real activity worth
+ * checking again for promptly; a 429 from `rest.getCard` (this server's
+ * OWN per-IP limiter, or salt-api's) is honoured via `err.retryAfterSeconds`
+ * (see SaltBearerApiError/salt-bearer-client.mjs) rather than being
+ * retried immediately or treated as fatal.
  */
-export async function pollForCardInteraction(rest, bearerToken, { cardId, after = 0, maxTotalMs, signal, minEmptyPollMs = MIN_EMPTY_POLL_MS }) {
+export async function pollForCardInteraction(rest, bearerToken, { cardId, after, maxTotalMs, signal, minEmptyPollMs = MIN_EMPTY_POLL_MS, matches }) {
   const deadline = Date.now() + maxTotalMs;
   let cursor = after;
   do {
@@ -193,7 +238,7 @@ export async function pollForCardInteraction(rest, bearerToken, { cardId, after 
     const startedAt = Date.now();
     let response;
     try {
-      response = await rest.agentUpdates(bearerToken, { after: cursor, timeoutSeconds: 2, limit: 50, signal });
+      response = await rest.getCard(bearerToken, cardId, { after: cursor, signal });
     } catch (err) {
       if (err instanceof SaltBearerApiError && err.status === 429) {
         const retryAfterMs = Math.max(1, Number(err.retryAfterSeconds) || 1) * 1000;
@@ -202,21 +247,15 @@ export async function pollForCardInteraction(rest, bearerToken, { cardId, after 
       }
       throw err;
     }
-    const updates = Array.isArray(response?.updates) ? response.updates : [];
-    for (const update of updates) {
-      if (update.event !== "card_interaction") continue;
-      let body;
-      try {
-        body = typeof update.body === "string" ? JSON.parse(update.body) : update.body;
-      } catch {
-        continue;
-      }
-      if (body && String(body.card_id) === String(cardId)) {
-        return { found: true, body, cursor: update.id };
-      }
-    }
-    if (response && response.cursor !== undefined) cursor = response.cursor;
-    if (updates.length === 0) {
+    const interactions = Array.isArray(response?.interactions) ? response.interactions : [];
+    // Newest first, per the route's contract -- advance the cursor to the
+    // newest interaction id seen regardless of whether it matches, so a
+    // resumed poll (get_ask_result) never re-reads a row it has already
+    // looked at and rejected.
+    if (interactions.length > 0 && interactions[0]?.id !== undefined) cursor = interactions[0].id;
+    const match = matches ? interactions.find((i) => matches(i)) : interactions[0];
+    if (match) return { found: true, body: match, cursor };
+    if (interactions.length === 0) {
       const elapsed = Date.now() - startedAt;
       if (elapsed < minEmptyPollMs) await sleep(minEmptyPollMs - elapsed, signal);
     }
@@ -354,34 +393,45 @@ async function askHuman(rest, bearerToken, input, ctx) {
   // by this or any other name in ask_human's inputSchema, and nothing
   // reads one off `input`; that's the exact gap a 2026-09-18 security
   // review found (a client-supplied `_maxTotalMs` was honoured).
+  //
+  // `matches` picks the answer out of this card's OWN interaction log:
+  // the newest interaction whose action_id is one of THIS ask's option
+  // buttons (opt_0.. -- see `actionMap` above). Filtering on that, rather
+  // than trusting "any interaction on this card is the answer," is a
+  // second, cheap guard on top of `restricted_to` (which already limits
+  // who can tap) and costs nothing since polling by card id already means
+  // no other ask's traffic can appear here at all.
   const poll = await pollForCardInteraction(rest, bearerToken, {
     cardId,
-    after: 0,
     maxTotalMs: ctx?.maxTotalMsOverride ?? ASK_HUMAN_MAX_MS,
     signal: ctx?.signal,
     minEmptyPollMs: ctx?.minEmptyPollMsOverride ?? MIN_EMPTY_POLL_MS,
+    matches: (interaction) => Object.prototype.hasOwnProperty.call(actionMap, interaction?.action_id),
   });
-  const askId = encodeAskId({ cardId, chatId, humanId: human.id, actionMap, cursor: poll.cursor ?? 0 });
+  // The ask_id is opaque to the model: just enough to resume this exact
+  // poll later (the card, its option map, and the newest interaction id
+  // already seen -- `after`, never the old outbox's numeric cursor).
+  const askId = encodeAskId({ cardId, actionMap, after: poll.cursor ?? null });
   if (!poll.found) return { status: "pending", ask_id: askId };
 
-  const answer = actionMap[poll.body.action_id] ?? poll.body.value ?? poll.body.action_id;
-  return { answer, ask_id: askId };
+  return { ...answerFromInteraction(actionMap, poll.body), ask_id: askId };
 }
 
 async function getAskResult(rest, bearerToken, input, ctx) {
   const askId = requireString(input.ask_id, "ask_id");
   const state = decodeAskId(askId);
+  const actionMap = state.actionMap || {};
   const poll = await pollForCardInteraction(rest, bearerToken, {
     cardId: state.cardId,
-    after: state.cursor ?? 0,
+    after: state.after ?? undefined,
     maxTotalMs: ctx?.maxTotalMsOverride ?? GET_ASK_RESULT_MAX_MS,
     signal: ctx?.signal,
     minEmptyPollMs: ctx?.minEmptyPollMsOverride ?? MIN_EMPTY_POLL_MS,
+    matches: (interaction) => Object.prototype.hasOwnProperty.call(actionMap, interaction?.action_id),
   });
-  const nextAskId = encodeAskId({ ...state, cursor: poll.cursor ?? state.cursor ?? 0 });
+  const nextAskId = encodeAskId({ cardId: state.cardId, actionMap, after: poll.cursor ?? state.after ?? null });
   if (!poll.found) return { status: "pending", ask_id: nextAskId };
-  const answer = state.actionMap?.[poll.body.action_id] ?? poll.body.value ?? poll.body.action_id;
-  return { answer, ask_id: nextAskId };
+  return { ...answerFromInteraction(actionMap, poll.body), ask_id: nextAskId };
 }
 
 async function requestPayment(rest, bearerToken, input, ctx) {
@@ -658,7 +708,13 @@ export const KEYLESS_TOOLS = [
     },
     outputSchema: {
       type: "object",
-      properties: { answer: { type: "string" }, status: { type: "string", enum: ["pending"] }, ask_id: { type: "string" } },
+      properties: {
+        answer: { type: "string" },
+        status: { type: "string", enum: ["pending"] },
+        ask_id: { type: "string" },
+        transfer_request_id: { type: "string", description: "Only present when the tap was a pay button." },
+        transfer_request_status: { type: "string", description: "The pay tap's live transfer request status, e.g. \"Pending\" or \"Confirmed\"." },
+      },
       required: ["ask_id"],
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -672,7 +728,13 @@ export const KEYLESS_TOOLS = [
     inputSchema: { type: "object", properties: { ask_id: { type: "string" } }, required: ["ask_id"] },
     outputSchema: {
       type: "object",
-      properties: { answer: { type: "string" }, status: { type: "string", enum: ["pending"] }, ask_id: { type: "string" } },
+      properties: {
+        answer: { type: "string" },
+        status: { type: "string", enum: ["pending"] },
+        ask_id: { type: "string" },
+        transfer_request_id: { type: "string", description: "Only present when the tap was a pay button." },
+        transfer_request_status: { type: "string", description: "The pay tap's live transfer request status, e.g. \"Pending\" or \"Confirmed\"." },
+      },
       required: ["ask_id"],
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },

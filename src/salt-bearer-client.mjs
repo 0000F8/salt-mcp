@@ -133,15 +133,26 @@ export function createSaltBearerClient({ host, fetchImpl }) {
     },
 
     /**
-     * Short-poll the socket-mode outbox (K2 contract). `timeoutSeconds` is
-     * clamped server-side to 0..2 regardless of what's asked here. `signal`
-     * (an AbortSignal) lets a caller stop an in-flight poll -- see
-     * keyless-tools.mjs's pollForCardInteraction, wired in src/http.mjs to
-     * the MCP request's own `res.on("close")`.
+     * Reads one card by id, INCLUDING its interaction log (salt-api
+     * 0.96.0, `GET /api/v1/cards/:id`; owner-only, or a bearer with `chat`
+     * scope whose agent owns the card -- it's on `Oauth::MCP_ALLOWLIST`).
+     * `interactions` comes back newest first, capped at 50 server-side.
+     * `after` (an interaction id or an ISO8601 timestamp) asks for only
+     * interactions strictly newer than that; omitted, the full (capped)
+     * list comes back. An unrecognised `after` fails OPEN server-side (the
+     * full list, never a 500), so this client never needs to validate its
+     * own cursor before sending it. `signal` (an AbortSignal) lets a
+     * caller stop an in-flight poll -- see keyless-tools.mjs's
+     * pollForCardInteraction, wired in src/http.mjs to the MCP request's
+     * own `res.on("close")`. Replaces the old agentUpdates/socket-outbox
+     * poll: that outbox has exactly one forward-only cursor PER AGENT, so
+     * two concurrent asks (or an ask beside any other listener draining
+     * the same outbox) could consume each other's answers. Polling one
+     * card by id is idempotent and shares nothing with any other ask.
      */
-    async agentUpdates(bearerToken, { after = 0, timeoutSeconds = 2, limit = 50, signal } = {}) {
-      const qs = new URLSearchParams({ after: String(after), timeout: String(timeoutSeconds), limit: String(limit) });
-      return request("GET", `/api/v1/agent/updates?${qs}`, bearerToken, undefined, { signal });
+    async getCard(bearerToken, cardId, { after, signal } = {}) {
+      const qs = after !== undefined && after !== null && after !== "" ? `?after=${encodeURIComponent(after)}` : "";
+      return request("GET", `/api/v1/cards/${encodeURIComponent(cardId)}${qs}`, bearerToken, undefined, { signal });
     },
 
     /**
