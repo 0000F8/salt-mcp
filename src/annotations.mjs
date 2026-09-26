@@ -171,6 +171,30 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: true,
     openWorldHint: true,
   },
+  // salt-agent-sdk 0.10.x (Identity R3/R4, identityShare.ts): the same gap
+  // again, three tools ahead this time. Read from the SDK's own action
+  // definitions on 2026-09-26, not guessed.
+  identity_share: {
+    title: "Share Identity Sections",
+    readOnlyHint: false,
+    destructiveHint: false, // discloses your OWN card sections into a chat as an encrypted message; deletes nothing, and identity_revoke takes it back
+    idempotentHint: false, // sharing the same keys again sends every member another message
+    openWorldHint: true, // every non-observer member of the chat receives it
+  },
+  identity_ask: {
+    title: "Ask for Identity Sections",
+    readOnlyHint: false,
+    destructiveHint: false, // sends the other person in a 1:1 a request; they may share, decline or ignore
+    idempotentHint: false, // each call sends another ask
+    openWorldHint: true,
+  },
+  identity_revoke: {
+    title: "Revoke an Identity Share",
+    readOnlyHint: false,
+    destructiveHint: true, // removes a share other members were relying on; a revoked share cannot be un-revoked, only re-shared
+    idempotentHint: true, // revoking an already-revoked share leaves the same state
+    openWorldHint: true,
+  },
 };
 
 /**
