@@ -243,6 +243,42 @@ export function createApp({ host, fetchImpl, oauthConfig, env, rateLimiter, rate
   // carrying its own credentials. A fresh server+transport per request
   // keeps callers fully isolated -- no shared session state, nothing to
   // leak between clients.
+  // GET and DELETE on the MCP endpoint (2026-09-26). Streamable HTTP lets a
+  // server open a standalone SSE stream on GET and end a session on DELETE;
+  // this server does neither, and until now only POST was routed, so both
+  // methods fell through to Express's bare 404 -- "nothing here". A health
+  // checker that probes with GET (Glama's does) read the endpoint as down,
+  // and an MCP client that tries GET first learned nothing about how to
+  // authenticate. The endpoint exists; the right answers are the same 401 +
+  // WWW-Authenticate that POST gives an anonymous caller (RFC 9728 -- this
+  // is how a client discovers the authorization server), and 405 with
+  // `Allow: POST` for anyone who is credentialed. No token is validated
+  // here on purpose: there is nothing to serve on success, and validating
+  // would let an anonymous prober spend this service's salt-api budget.
+  const unsupportedMethod = (req, res) => {
+    const callerIp = callerIpFromRequest(req, requestEnv) || "unknown";
+    const rateCheck = limiter.check(callerIp);
+    if (!rateCheck.allowed) {
+      return res
+        .status(429)
+        .set("Retry-After", String(rateCheck.retryAfterSeconds))
+        .json({ jsonrpc: "2.0", error: { code: -32004, message: "Too many requests. Slow down and retry later." }, id: null });
+    }
+    if (!callerFromHeaders(req) && !extractBearerToken(req.get("Authorization"))) {
+      return sendUnauthorized(res, config);
+    }
+    return res
+      .status(405)
+      .set("Allow", "POST")
+      .json({
+        jsonrpc: "2.0",
+        error: { code: -32601, message: `This server does not support ${req.method} on /mcp: it opens no standalone stream and keeps no session. Send JSON-RPC over POST.` },
+        id: null,
+      });
+  };
+  app.get("/mcp", unsupportedMethod);
+  app.delete("/mcp", unsupportedMethod);
+
   app.post("/mcp", async (req, res) => {
     // Rate limit FIRST -- ahead of legacy/bearer branching, ahead of
     // token validation, ahead of everything. See src/rate-limiter.mjs's

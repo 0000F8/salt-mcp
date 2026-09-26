@@ -89,6 +89,45 @@ test("POST /mcp with no credentials at all returns 401 with the exact RFC 9728 W
   }
 });
 
+// --- GET and DELETE on /mcp: exists, not 404 (2026-09-26) --------------------
+//
+// Only POST was routed, so GET fell through to Express's bare 404. A health
+// checker probing with GET (Glama's does) read the endpoint as down, and a
+// client trying GET first learned nothing about how to authenticate.
+
+for (const method of ["GET", "DELETE"]) {
+  test(`${method} /mcp with no credentials answers the same 401 + WWW-Authenticate as POST, never a 404`, async () => {
+    const app = createApp({ host: "https://fake-salt.test", fetchImpl: fakeSaltApi({}) });
+    const { server, baseUrl } = await listen(app);
+    try {
+      const res = await fetch(`${baseUrl}/mcp`, { method });
+      assert.equal(res.status, 401);
+      assert.equal(
+        res.headers.get("www-authenticate"),
+        'Bearer resource_metadata="https://mcp.saltapp.ai/.well-known/oauth-protected-resource/mcp"'
+      );
+    } finally {
+      server.close();
+    }
+  });
+
+  test(`${method} /mcp with a bearer answers 405 Allow: POST, and salt-api is never called to validate it`, async () => {
+    const calls = [];
+    const app = createApp({ host: "https://fake-salt.test", fetchImpl: fakeSaltApi({}, calls) });
+    const { server, baseUrl } = await listen(app);
+    try {
+      const res = await fetch(`${baseUrl}/mcp`, { method, headers: { Authorization: "Bearer sat_anything" } });
+      assert.equal(res.status, 405);
+      assert.equal(res.headers.get("allow"), "POST");
+      const body = await res.json();
+      assert.equal(body.error.code, -32601);
+      assert.equal(calls.length, 0, "nothing to serve on success, so no token validation round trip");
+    } finally {
+      server.close();
+    }
+  });
+}
+
 test("POST /mcp with a malformed Authorization header (not 'Bearer <token>') also gets the 401 + WWW-Authenticate", async () => {
   const app = createApp({ host: "https://fake-salt.test", fetchImpl: fakeSaltApi({}) });
   const { server, baseUrl } = await listen(app);
