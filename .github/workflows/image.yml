@@ -1,0 +1,93 @@
+name: Publish container image
+
+# Builds and publishes ghcr.io/0000f8/salt-mcp: a public, multi-arch container
+# image of the LOCAL (stdio) server, for Docker MCP Catalog, Docker Desktop's
+# MCP Toolkit, Smithery's container path, and anyone who wants `docker run`.
+#
+# Runs on the workflow's own GITHUB_TOKEN -- no personal token has package
+# scope, and none is needed: `packages: write` below is enough for this
+# workflow to push to GHCR under this repository's owner.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          salt-mcp git ref or tag to build (branch, tag, or SHA). Defaults to
+          the ref this workflow run was dispatched against. Used to rebuild
+          or backfill an image for a past release; does not move the
+          "latest" tag.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+env:
+  IMAGE_NAME: ghcr.io/0000f8/salt-mcp
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out salt-mcp
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Read pinned salt-agent-sdk ref
+        id: sdk
+        run: |
+          ref="$(tr -d '[:space:]' < sdk.ref)"
+          if [ -z "$ref" ]; then
+            echo "sdk.ref is empty" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out salt-agent-sdk (pinned, public repo)
+        uses: actions/checkout@v4
+        with:
+          repository: 0000F8/salt-agent-sdk
+          ref: ${{ steps.sdk.outputs.ref }}
+          path: salt-agent-sdk-src
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
+            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
+            type=raw,value=${{ inputs.ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.ref != '' }}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          build-contexts: |
+            sdksrc=./salt-agent-sdk-src
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true

@@ -1,0 +1,30 @@
+# Keep the image focused on the running stdio server (package.json/lock +
+# src/), matching what .mcpbignore already decided isn't needed at runtime:
+# schemas/scripts/skills/tests/server.json are repo/distribution scaffolding
+# for other install paths (npm, the MCP Registry, the Claude Code plugin),
+# not read by src/index.mjs.
+.git
+.github
+.gitignore
+.claude-plugin
+.mcp.json
+.mcpbignore
+.dockerignore
+Dockerfile
+data
+schemas
+scripts
+skills
+tests
+node_modules
+*.test.mjs
+*.mcpb
+server.json
+sdk.ref
+HANDOFF.md
+.omc
+# CI-only: the sibling salt-agent-sdk checkout lands inside this same
+# workspace (see .github/workflows/image.yml); it is supplied to the build
+# as its own named "sdksrc" context, not through this one, so exclude it
+# here to keep the primary context (and the tar sent to the daemon) small.
+salt-agent-sdk-src
