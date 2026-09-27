@@ -1,0 +1,152 @@
+# Publishes salt-mcp to npm on every version tag push.
+#
+# salt-mcp is the Model Context Protocol resource server for Salt agents
+# (discover agents, buy/sell products, invoice, provision wallets, spawn
+# sub-agents) and it depends on salt-agent-sdk, which carries PGP/webhook
+# crypto. This publish is provenance-attested rather than run from a
+# laptop: provenance lets anyone verify a given npm release was built by
+# this exact workflow, from this exact repository and commit. This is a
+# SEPARATE artifact from `.github/workflows/image.yml` in this repo, which
+# builds and pushes the ghcr.io container image on a GitHub Release; this
+# workflow only publishes the npm package.
+#
+# ─── DEPENDENCY ORDER ──────────────────────────────────────────────────────────
+#
+# salt-agent-sdk MUST publish first. This workflow's "Ensure salt-agent-sdk
+# is published" step refuses to continue if the salt-agent-sdk version
+# range in this package's package.json isn't yet resolvable from the
+# public npm registry -- publishing salt-mcp before then would produce an
+# uninstallable package.
+#
+# ─── PREREQUISITES ─────────────────────────────────────────────────────────────
+#
+# This repo has no CI workflow of its own to read a pinned Node version
+# from, so this workflow uses 'lts/*' -- the same value n8n-nodes-saltapp's
+# own ci.yml and publish.yml use, and the house convention for a repo that
+# doesn't pin one -- which satisfies this package's engines.node (">=18").
+#
+# ─── ONE-TIME SETUP ────────────────────────────────────────────────────────────
+#
+# Option A — OIDC Trusted Publishing (recommended, no long-lived secrets):
+#   1. Log in to npmjs.com and open the salt-mcp package's settings.
+#   2. Under "Publish access" → "Trusted Publishers", click "Add a publisher".
+#   3. Select GitHub Actions and fill in:
+#        Repository owner: 0000F8
+#        Repository name:  salt-mcp
+#        Workflow name:    publish.yml
+#        Environment:      (leave blank unless a GitHub Environment is added)
+#   4. Leave the NPM_TOKEN secret unset in this repository. GitHub's OIDC
+#      token is used instead — no secret ever touches repo settings.
+#
+# Option B — npm Automation Token (fallback):
+#   1. On npmjs.com: Access Tokens → Generate New Token → Granular Access Token.
+#      Scope it to salt-mcp with "Read and write" publish permission.
+#   2. In GitHub: Settings → Secrets and variables → Actions → New secret.
+#      Name it NPM_TOKEN and paste the token value.
+#
+# Both options work with --provenance. Provenance is signed by GitHub's OIDC
+# infrastructure regardless of how npm authentication is handled.
+#
+# ─── TAG CONVENTION ────────────────────────────────────────────────────────────
+#
+# Triggers on tags matching "*.*.*" (e.g. 0.2.5) — the same shape and
+# no-"v"-prefix convention n8n-nodes-saltapp's publish.yml uses, kept
+# consistent across this org's npm packages. Note: this repo already has
+# one pre-existing tag, "v0.2.1" (with a "v" prefix, from a metadata-only
+# commit, unrelated to this workflow). Do not repeat that prefix for an npm
+# release tag or this workflow will not fire — use the bare "0.2.5" form.
+#
+# ─── RELEASE PROCESS ───────────────────────────────────────────────────────────
+#
+# 1. Bump "version" in package.json to the new value, commit it.
+# 2. Tag and push:
+#      git tag 0.2.5 && git push origin 0.2.5
+# 3. This workflow checks salt-agent-sdk is resolvable, runs the test
+#    suite, and publishes with provenance. It refuses to publish if the
+#    pushed tag doesn't match package.json's version.
+#
+# To re-run a publish that failed partway (e.g. a transient registry error),
+# use workflow_dispatch with `ref` set to the same tag — it does not move
+# the tag or re-tag anything.
+
+name: Publish
+
+on:
+  push:
+    tags:
+      # Matches 0.1.0, 1.2.3, 2.0.0-rc.1, etc. See "TAG CONVENTION" above.
+      - '*.*.*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          Tag to (re-)publish (branch, tag, or SHA; normally the same tag
+          that failed). Defaults to the ref this workflow run was dispatched
+          against. The tag-vs-version guard still applies.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    if: github.repository == '0000F8/salt-mcp'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: 'npm'
+
+      - name: Verify tag matches package.json version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.ref }}"
+            tag="${tag#refs/tags/}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg_version" ]; then
+            echo "::error::Tag '$tag' does not match package.json version '$pkg_version'. Refusing to publish a mismatched version." >&2
+            exit 1
+          fi
+          echo "Tag '$tag' matches package.json version '$pkg_version'."
+
+      - name: Ensure salt-agent-sdk is published
+        run: |
+          range="$(node -p "require('./package.json').dependencies['salt-agent-sdk']")"
+          if ! npm view "salt-agent-sdk@${range}" version >/dev/null 2>&1; then
+            echo "::error::No version of salt-agent-sdk satisfying '${range}' (this package's dependency range) is resolvable from the public npm registry yet. salt-agent-sdk must publish first -- see the workflow header." >&2
+            exit 1
+          fi
+          echo "salt-agent-sdk@${range} is resolvable on npm."
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Publish
+        # Publishes to npm with a provenance attestation (requires
+        # id-token: write above).
+        #
+        # Option A (OIDC): leave NPM_TOKEN unset — the token step is skipped
+        #   and npm uses the OIDC exchange instead.
+        # Option B (token): set NPM_TOKEN in repo secrets — it is written to
+        #   .npmrc here before publishing.
+        run: |
+          [ -n "$NPM_TOKEN" ] && npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          npm publish --provenance --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
