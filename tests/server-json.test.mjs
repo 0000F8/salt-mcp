@@ -50,7 +50,7 @@ test("server.json claims no package until salt-mcp is actually on npm; when it d
       assert.equal(p.registryType, "oci", "only the OCI image may be listed while salt-mcp is not on npm");
       assert.match(p.identifier, /^ghcr\.io\/0000f8\/salt-mcp:v\d+\.\d+\.\d+$/, "OCI identifier is the canonical reference with the release tag (the registry rejects registryBaseUrl for OCI)");
       assert.equal(p.transport.type, "stdio");
-      assert.notEqual(p.version, "latest", "the OCI version must be a specific release tag");
+      assert.equal(p.version, undefined, "the registry refuses a version field on OCI packages; the tag rides in the identifier");
     }
     assert.ok((serverJson.remotes || []).length > 0, "the entry must still name the hosted server");
     return;
