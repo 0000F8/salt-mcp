@@ -48,7 +48,7 @@ test("server.json claims no package until salt-mcp is actually on npm; when it d
     // registry can verify by its io.modelcontextprotocol.server.name label.
     for (const p of serverJson.packages || []) {
       assert.equal(p.registryType, "oci", "only the OCI image may be listed while salt-mcp is not on npm");
-      assert.equal(p.identifier, "0000f8/salt-mcp");
+      assert.match(p.identifier, /^ghcr\.io\/0000f8\/salt-mcp:v\d+\.\d+\.\d+$/, "OCI identifier is the canonical reference with the release tag (the registry rejects registryBaseUrl for OCI)");
       assert.equal(p.transport.type, "stdio");
       assert.notEqual(p.version, "latest", "the OCI version must be a specific release tag");
     }
