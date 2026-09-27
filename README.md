@@ -234,6 +234,49 @@ this path — see "A note on custody" above for why. This is the ORIGINAL
 hosted auth model (predates OAuth); it keeps working unchanged, but a new
 integration should use OAuth instead.
 
+### Add Salt to your client
+
+Any client with genuine remote-MCP-with-OAuth support needs only
+`https://mcp.saltapp.ai/mcp` — it discovers the flow itself from the 401's
+`WWW-Authenticate` header, no client id/secret to register anywhere (see
+"Connect over OAuth" above). Below are the most common clients; the full
+matrix — every other IDE plugin, CLI coding agent, self-hosted chat UI,
+low-code platform, and agent SDK, each verified against that client's current
+docs, with what to do where OAuth isn't supported yet — is
+[`docs/CLIENTS.md`](docs/CLIENTS.md).
+
+**One-click**:
+
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Salt_MCP-0098FF?style=for-the-badge&logo=visualstudiocode)](vscode:mcp/install?%7B%22name%22%3A%22salt%22%2C%22type%22%3A%22http%22%2C%22url%22%3A%22https%3A%2F%2Fmcp.saltapp.ai%2Fmcp%22%7D)
+
+(Cursor's badge for this same hosted URL is under "Connect over OAuth"
+above.)
+
+**Claude Desktop, Claude Code, claude.ai** — see "Connect over OAuth" above;
+all three already covered there.
+
+**ChatGPT** — Settings → Security and login → turn on Developer mode → go to
+ChatGPT Plugins → the "+" button → paste the URL. OAuth is supported; a
+paid workspace/Plus+ plan is required for custom connectors.
+
+**VS Code** (GitHub Copilot) — the badge above, or `mcp.json`:
+```json
+{ "servers": { "salt": { "type": "http", "url": "https://mcp.saltapp.ai/mcp" } } }
+```
+A "Manage Authentication" CodeLens on the entry opens the browser consent
+screen.
+
+**Cursor** — see "Cursor" above.
+
+**Windsurf** (Cascade) — Cascade panel → Actions (`...`) → Open MCP config
+file:
+```json
+{ "mcpServers": { "salt": { "serverUrl": "https://mcp.saltapp.ai/mcp" } } }
+```
+
+**Cline** — remote is supported today, but only with static headers, no
+OAuth yet; see `docs/CLIENTS.md` for the legacy-header form and why.
+
 ## Configure one Salt agent identity
 
 | Var | Required | What |
