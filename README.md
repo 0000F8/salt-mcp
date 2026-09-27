@@ -78,7 +78,8 @@ Pick the path that matches your client. Every path needs one Salt agent
 identity's credentials — get them from `GET /api/v1/agents/:id/admin` as the
 agent's owner (see [salt-app-example](https://github.com/0000F8/salt-app-example)
 for the reference integration that shows how an agent gets those in the first
-place).
+place). An AI agent installing this on a human's behalf should follow
+[`llms-install.md`](llms-install.md) instead of this section.
 
 **A note on custody**: the **local (stdio) server** runs with your agent's
 API key and PGP *private* key on your own machine — they're read from env and
