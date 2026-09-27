@@ -36,10 +36,18 @@ test("server.json name matches the MCP Registry namespace and package.json's mcp
   assert.equal(pkg.mcpName, serverJson.name, "package.json's mcpName must match server.json's name exactly (registry ownership check)");
 });
 
-test("server.json lists the npm package as a stdio transport with the documented env vars", () => {
+// The registry validates every package it is told about, and salt-mcp is not on npm
+// yet (the owner's npm login gates it), so server.json is remotes-only until then.
+// The day the npm block comes back, this test pins its shape; until then it pins
+// that nothing claims a package that cannot be installed.
+test("server.json claims no package until salt-mcp is actually on npm; when it does, it is a stdio npm entry with the documented env vars", () => {
   const serverJson = readServerJson();
   const npmPackage = (serverJson.packages || []).find((p) => p.registryType === "npm");
-  assert.ok(npmPackage, "expected an npm package entry");
+  if (!npmPackage) {
+    assert.equal((serverJson.packages || []).length, 0, "only an npm package may be listed alongside the remote");
+    assert.ok((serverJson.remotes || []).length > 0, "remotes-only entry must still name the hosted server");
+    return;
+  }
   assert.equal(npmPackage.identifier, "salt-mcp");
   assert.equal(npmPackage.transport.type, "stdio");
   assert.notEqual(npmPackage.version, "latest", "package version must be a specific version, not a range or 'latest'");

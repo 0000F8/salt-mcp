@@ -8,7 +8,7 @@
     "url": "https://github.com/0000F8/salt-mcp",
     "source": "github"
   },
-  "version": "0.2.1",
+  "version": "0.2.2",
   "remotes": [
     {
       "type": "streamable-http",

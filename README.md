@@ -214,6 +214,54 @@ rather keep them out of the file).
 }
 ```
 
+### Docker" subsection, after "Any MCP client (JSON config)", before "Hosted server")
+
+### Docker
+
+A public, multi-arch image of this same stdio server is published to GHCR on
+every release:
+
+```bash
+docker run -i --rm \
+  -e HOST=https://api.saltapp.ai \
+  -e SALT_API_KEY=… \
+  -e SALT_APP_ID=… \
+  -e APP_PUBLIC_KEY=… \
+  -e APP_PRIVATE_KEY=… \
+  -e PGP_PASSPHRASE=… \
+  ghcr.io/0000f8/salt-mcp
+```
+
+Optional: `WALLET_MASTER_KEY` (enables `create_wallet`), `CONCIERGE_AGENT_ID`
+(enables `hand_back_to_concierge`'s fallback destination) — see "Configure
+one Salt agent identity" above for what each variable is.
+
+In an MCP client's JSON config:
+
+```json
+{
+  "mcpServers": {
+    "salt": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "HOST", "-e", "SALT_API_KEY", "-e", "SALT_APP_ID",
+        "-e", "APP_PUBLIC_KEY", "-e", "APP_PRIVATE_KEY", "-e", "PGP_PASSPHRASE",
+        "ghcr.io/0000f8/salt-mcp"
+      ],
+      "env": {
+        "HOST": "https://api.saltapp.ai",
+        "SALT_API_KEY": "…",
+        "SALT_APP_ID": "…",
+        "APP_PUBLIC_KEY": "…",
+        "APP_PRIVATE_KEY": "…",
+        "PGP_PASSPHRASE": "…"
+      }
+    }
+  }
+}
+```
+
 ### Hosted server (no install)
 
 **OAuth (recommended)**: see "Connect over OAuth" above — just point your
