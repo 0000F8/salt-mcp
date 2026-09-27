@@ -76,6 +76,9 @@ on:
     tags:
       # Matches 0.1.0, 1.2.3, 2.0.0-rc.1, etc. See "TAG CONVENTION" above.
       - '*.*.*'
+      # Every release tag this project has actually cut is v-prefixed
+      # (v0.2.4, v0.3.3 ...), so both forms fire. The guard below strips the v.
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       ref:
@@ -115,6 +118,7 @@ jobs:
           else
             tag="${{ github.ref_name }}"
           fi
+          tag="${tag#v}"
           pkg_version="$(node -p "require('./package.json').version")"
           if [ "$tag" != "$pkg_version" ]; then
             echo "::error::Tag '$tag' does not match package.json version '$pkg_version'. Refusing to publish a mismatched version." >&2
