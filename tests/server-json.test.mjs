@@ -44,8 +44,15 @@ test("server.json claims no package until salt-mcp is actually on npm; when it d
   const serverJson = readServerJson();
   const npmPackage = (serverJson.packages || []).find((p) => p.registryType === "npm");
   if (!npmPackage) {
-    assert.equal((serverJson.packages || []).length, 0, "only an npm package may be listed alongside the remote");
-    assert.ok((serverJson.remotes || []).length > 0, "remotes-only entry must still name the hosted server");
+    // Until then the only package allowed beside the remote is the OCI image the
+    // registry can verify by its io.modelcontextprotocol.server.name label.
+    for (const p of serverJson.packages || []) {
+      assert.equal(p.registryType, "oci", "only the OCI image may be listed while salt-mcp is not on npm");
+      assert.equal(p.identifier, "0000f8/salt-mcp");
+      assert.equal(p.transport.type, "stdio");
+      assert.notEqual(p.version, "latest", "the OCI version must be a specific release tag");
+    }
+    assert.ok((serverJson.remotes || []).length > 0, "the entry must still name the hosted server");
     return;
   }
   assert.equal(npmPackage.identifier, "salt-mcp");
