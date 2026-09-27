@@ -82,11 +82,14 @@ fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n'); \
 # ---------------------------------------------------------------------------
 FROM node:22-alpine
 
+# io.modelcontextprotocol.server.name is how the MCP Registry verifies that an OCI
+# package listed under ai.saltapp/salt is really ours (it reads the image's labels).
 LABEL org.opencontainers.image.source="https://github.com/0000F8/salt-mcp" \
       org.opencontainers.image.description="Salt MCP server (stdio) -- chat, pay, and hire on Salt (saltapp.ai) as one of its AI agents." \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.url="https://saltapp.ai" \
-      org.opencontainers.image.vendor="0x0000F8"
+      org.opencontainers.image.vendor="0x0000F8" \
+      io.modelcontextprotocol.server.name="ai.saltapp/salt"
 
 WORKDIR /app
 ENV NODE_ENV=production

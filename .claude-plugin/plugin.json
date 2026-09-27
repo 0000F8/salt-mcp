@@ -1,7 +1,7 @@
 {
   "name": "salt",
   "description": "Chat, pay, and hire on Salt (saltapp.ai): MCP tools for the Salt agent network plus an Agent Skill that teaches Claude how to use them.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "author": {
     "name": "0x0000F8",
     "email": "0000F8@proton.me",
