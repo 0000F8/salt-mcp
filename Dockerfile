@@ -32,33 +32,27 @@
 # Stage 1: build salt-agent-sdk (from the "sdksrc" additional context) and
 # pack it into a tarball.
 # ---------------------------------------------------------------------------
-FROM node:22-alpine AS sdk-builder
+# --platform=$BUILDPLATFORM: tsc and npm pack are architecture-neutral, and
+# running them under QEMU for the arm64 half of a multi-arch build crashed
+# node with SIGILL (exit 132) on the v0.2.2 release build. Build once,
+# natively; the tarball is the same for every target.
+FROM --platform=$BUILDPLATFORM node:22-alpine AS sdk-builder
 
 WORKDIR /salt-agent-sdk
 COPY --from=sdksrc . .
 RUN npm ci --include=dev && npm pack --pack-destination /tmp
 
 # ---------------------------------------------------------------------------
-# Stage 2: runtime image.
+# Stage 2: install salt-mcp's dependencies, natively for the same reason as
+# above. The lockfile carries no platform-specific or native package
+# (checked: no cpu/os/hasInstallScript entries), so node_modules built on
+# the build platform is byte-identical to what the target would produce.
 # ---------------------------------------------------------------------------
-FROM node:22-alpine
-
-LABEL org.opencontainers.image.source="https://github.com/0000F8/salt-mcp" \
-      org.opencontainers.image.description="Salt MCP server (stdio) -- chat, pay, and hire on Salt (saltapp.ai) as one of its AI agents." \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.url="https://saltapp.ai" \
-      org.opencontainers.image.vendor="0x0000F8"
+FROM --platform=$BUILDPLATFORM node:22-alpine AS deps
 
 WORKDIR /app
 ENV NODE_ENV=production
-
 COPY --from=sdk-builder /tmp/salt-agent-sdk-*.tgz /tmp/
-
-# Trim salt-agent-sdk from package.json/package-lock.json as ONE consistent
-# edit (so `npm ci` still pins every other dependency exactly against the
-# real lockfile), install the rest from the lock, then install the
-# from-source SDK tarball on top. See salt-deploy/docker/mcp.Dockerfile for
-# the same pattern applied to the hosted HTTP image.
 COPY package.json package-lock.json ./
 RUN node -e "\
 const fs = require('fs'); \
@@ -82,6 +76,27 @@ fs.writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n'); \
  && rm -f /tmp/salt-agent-sdk-*.tgz \
  && npm cache clean --force \
  && rm -rf /root/.npm
+
+# ---------------------------------------------------------------------------
+# Stage 3: runtime image (the real target platform; nothing is compiled here).
+# ---------------------------------------------------------------------------
+FROM node:22-alpine
+
+LABEL org.opencontainers.image.source="https://github.com/0000F8/salt-mcp" \
+      org.opencontainers.image.description="Salt MCP server (stdio) -- chat, pay, and hire on Salt (saltapp.ai) as one of its AI agents." \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.url="https://saltapp.ai" \
+      org.opencontainers.image.vendor="0x0000F8"
+
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=deps /app/node_modules ./node_modules
+
+# Trim salt-agent-sdk from package.json/package-lock.json as ONE consistent
+# edit (so `npm ci` still pins every other dependency exactly against the
+# real lockfile), install the rest from the lock, then install the
+# from-source SDK tarball on top. See salt-deploy/docker/mcp.Dockerfile for
+# the same pattern applied to the hosted HTTP image.
 
 # Restore salt-mcp's real, untrimmed package.json/lock over the temporary
 # copies above -- node_modules already has the right contents, and the
