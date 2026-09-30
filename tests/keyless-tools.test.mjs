@@ -197,12 +197,28 @@ test("open_chat resolves a handle against contacts, then the directory, then ope
     async createOrGetChat(token, contactId) {
       assert.equal(token, "tok");
       assert.equal(contactId, RECEIVER_ID);
-      return { id: CHAT_ID, name: null, session: { users: [{ id: RECEIVER_ID, username: "faucet", display_name: "Faucet", account_type: "Agent" }] } };
+      // POST /api/v1/chats' real shape: the chat payload at the top level.
+      return { id: CHAT_ID, name: null, users: [{ id: RECEIVER_ID, username: "faucet", display_name: "Faucet", account_type: "Agent" }] };
     },
   };
   const result = await runKeylessTool("open_chat", { handle: "@faucet" }, { rest, bearerToken: "tok" });
   assert.equal(result.chat_id, CHAT_ID);
   assert.equal(result.members.length, 1);
+});
+
+test("open_chat also reads a {session} wrapped chat payload", async () => {
+  const rest = {
+    async searchContacts() { return []; },
+    async listAgentsDirectory() {
+      return [{ id: RECEIVER_ID, username: "faucet", display_name: "Faucet", account_type: "Agent" }];
+    },
+    async createOrGetChat() {
+      return { session: { id: CHAT_ID, name: "F", users: [{ id: RECEIVER_ID, username: "faucet" }] } };
+    },
+  };
+  const result = await runKeylessTool("open_chat", { handle: "faucet" }, { rest, bearerToken: "tok" });
+  assert.equal(result.chat_id, CHAT_ID);
+  assert.equal(result.name, "F");
 });
 
 test("open_chat refuses a handle nobody has", async () => {
@@ -217,12 +233,15 @@ test("list_chats returns metadata only -- id, name, members, unread_count -- and
   const rest = {
     async listChats() {
       return [
+        // GET /api/v1/chats' real row shape: the chat nested under `session`.
         {
-          id: CHAT_ID,
-          name: "Group",
-          users: [{ id: RECEIVER_ID, username: "ada", display_name: "Ada", account_type: "User" }],
-          unread_count: 3,
-          messages: [{ id: "m1", message: "some-ciphertext-should-never-appear" }],
+          session: {
+            id: CHAT_ID,
+            name: "Group",
+            users: [{ id: RECEIVER_ID, username: "ada", display_name: "Ada", account_type: "User" }],
+            unread_count: 3,
+          },
+          recent_message: { message: { id: "m1", message: "some-ciphertext-should-never-appear" } },
         },
       ];
     },
@@ -998,4 +1017,19 @@ test("an aborted signal cuts a Retry-After wait short instead of waiting it out"
   assert.equal(result.found, false);
   assert.ok(Date.now() - start < 1_000, "the abort must cut the 30s Retry-After wait short, not wait it out");
   assert.equal(calls, 1, "the loop must not retry after the signal aborts, even mid-backoff");
+});
+
+test("searchContacts sends username= with the leading @ stripped, so it works against an API without q", async () => {
+  const { createSaltBearerClient } = await import("../src/salt-bearer-client.mjs");
+  let seenUrl;
+  const client = createSaltBearerClient({
+    host: "https://salt.test",
+    fetchImpl: async (url) => {
+      seenUrl = url;
+      return { ok: true, status: 200, text: async () => JSON.stringify([{ id: RECEIVER_ID, username: "ada" }]) };
+    },
+  });
+  const result = await client.searchContacts("tok", "@ada");
+  assert.equal(seenUrl, "https://salt.test/api/v1/search/contacts?username=ada");
+  assert.equal(result[0].username, "ada");
 });

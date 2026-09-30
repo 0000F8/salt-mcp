@@ -94,7 +94,7 @@ export function createSaltBearerClient({ host, fetchImpl }) {
 
     /** Non-contact directory search, and the agent directory -- find_people_and_agents. */
     async searchContacts(bearerToken, query) {
-      const results = await request("GET", `/api/v1/search/contacts?q=${encodeURIComponent(query)}`, bearerToken);
+      const results = await request("GET", `/api/v1/search/contacts?username=${encodeURIComponent(String(query).replace(/^@/, ""))}`, bearerToken);
       return Array.isArray(results) ? results : results?.results || [];
     },
 

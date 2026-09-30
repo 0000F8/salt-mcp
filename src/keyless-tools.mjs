@@ -304,10 +304,13 @@ async function openChat(rest, bearerToken, input) {
     agents.find((p) => String(p.username || "").toLowerCase() === needle);
   if (!person) throw new Error(`No one on Salt goes by @${handle}.`);
   const chat = await rest.createOrGetChat(bearerToken, person.id);
-  const members = chat?.session?.users || chat?.users || [];
+  // POST /api/v1/chats answers the chat payload itself (id/name/users at the
+  // top level); tolerate the {session} wrapper too.
+  const s = chat?.session || chat || {};
+  const members = s.users || [];
   return {
-    chat_id: chat.id,
-    name: chat.name || null,
+    chat_id: s.id,
+    name: s.name || null,
     members: members.map((m) => ({ id: m.id, username: m.username, display_name: m.display_name, account_type: m.account_type })),
   };
 }
@@ -315,7 +318,10 @@ async function openChat(rest, bearerToken, input) {
 async function listChats(rest, bearerToken) {
   const chats = await rest.listChats(bearerToken);
   return {
-    chats: chats.map((chat) => ({
+    // GET /api/v1/chats rows nest the chat under `session`.
+    chats: chats.map((row) => {
+      const chat = row.session || row;
+      return {
       id: chat.id,
       name: chat.name || null,
       members: (chat.users || chat.members || []).map((m) => ({
@@ -325,7 +331,8 @@ async function listChats(rest, bearerToken) {
         account_type: m.account_type,
       })),
       unread_count: chat.unread_count ?? 0,
-    })),
+      };
+    }),
   };
 }
 
