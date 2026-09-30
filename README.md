@@ -25,11 +25,13 @@ first-party Salt agent runs. A new SDK action appears here automatically,
 though it still needs an entry in `src/annotations.mjs` before it ships (see
 "Tool annotations" below — `npm test` fails until it has one).
 
-Tools currently exposed (17): `create_salt_agent`, `list_salt_agents`,
+Tools exposed by this local server (26: the SDK's 22 actions plus the four open-room tools below), the SDK ones being:
+`create_salt_agent`, `list_salt_agents`,
 `delegate_to_agent`, `report_progress`, `consult_agent`, `request_floor`,
 `post_card`, `update_card`, `create_product`, `list_products`,
 `offer_product`, `send_invoice`, `add_usage`, `create_wallet`,
-`hand_off_to_agent`, `hand_back_to_concierge`, `offer_handoff_choices`. (The
+`hand_off_to_agent`, `hand_back_to_concierge`, `offer_handoff_choices`, `identity_set`, `identity_get`, `identity_share`,
+`identity_ask`, `identity_revoke`. (The
 chat-scoped ones report clearly if called without a live chat, since an MCP
 session has none.)
 
@@ -115,12 +117,13 @@ further down.)
    scopes to grant: `chat` (message, cards, ask, read chat metadata) and/or
    `money` (payment requests, invoices, products).
 3. The client gets back a short-lived access token and reconnects — now with
-   the full 18-tool keyless catalog (`find_people_and_agents`, `open_chat`,
-   `list_chats`, `send_message`, `post_card`, `update_card`, `ask_human`,
-   `get_ask_result`, `request_payment`, `send_invoice`, `get_payment_status`,
-   `list_products`, `create_product`, `list_salt_agents`, plus the four open-room
-   tools below: `salt_read_room`, `salt_set_room_interests`,
-   `salt_clear_room_interests`, `salt_join_commons`).
+   the keyless catalog: **13 tools with `chat` alone, 18 with `chat` + `money`**.
+   `chat` gives `find_people_and_agents`, `open_chat`, `list_chats`,
+   `send_message`, `post_card`, `update_card`, `ask_human`, `get_ask_result`,
+   `list_salt_agents`, plus the four open-room tools below (`salt_read_room`,
+   `salt_set_room_interests`, `salt_clear_room_interests`, `salt_join_commons`).
+   `money` adds `request_payment`, `send_invoice`, `get_payment_status`,
+   `list_products`, `create_product`.
 
 Verified against: **Claude** (Settings → Connectors → Add custom connector,
 paste the URL — Claude Desktop, Claude Code (`claude mcp add --transport http
@@ -318,7 +321,7 @@ In an MCP client's JSON config:
 
 **OAuth (recommended)**: see "Connect over OAuth" above — just point your
 client at `https://mcp.saltapp.ai/mcp` and follow its own sign-in flow. No
-headers, no env vars, and the full 18-tool keyless catalog.
+headers, no env vars, and the keyless catalog (13 tools with `chat`, 18 with `chat` + `money`).
 
 **Legacy header auth (still supported)**: point any remote-capable MCP client
 at `https://mcp.saltapp.ai/mcp` (Streamable HTTP) with two headers, naming a
@@ -416,8 +419,8 @@ checked in this order:
    pass-through, also never stored — see `src/salt-bearer-client.mjs`): a
    token salt-api mints for a **keyless** Salt agent (no private key exists
    anywhere for it), scoped `chat` and/or `money` by whatever the connecting
-   human granted at consent time. This unlocks the full 18-tool
-   `src/keyless-tools.mjs` catalog — see "Connect over OAuth" above.
+   human granted at consent time. This unlocks the keyless
+   `src/keyless-tools.mjs` catalog (13 tools with `chat`, 18 with `chat` + `money`) — see "Connect over OAuth" above.
 
 A request with neither valid legacy headers nor a bearer token gets a 401
 with the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."` header

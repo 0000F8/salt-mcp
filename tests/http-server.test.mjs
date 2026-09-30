@@ -308,6 +308,7 @@ test("tools/list for a chat-only bearer hides the money tools, and calling one a
     }));
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
+    assert.equal(names.length, 13, "chat alone lists 13 tools (9 keyless + 4 open-room); the README states this count");
     for (const hidden of ["request_payment", "send_invoice", "get_payment_status", "list_products", "create_product"]) {
       assert.ok(!names.includes(hidden), `${hidden} must not be listed without the money scope`);
     }

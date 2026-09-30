@@ -795,6 +795,81 @@ test("get_ask_result resumes from a pending ask_id and resolves once the tap lan
   assert.equal(resolved.answer, "Yes");
 });
 
+test("an answered ask rewrites its card to the question plus the answer, once, from ask_human", async () => {
+  const updates = [];
+  const rest = {
+    async getChat() {
+      return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
+    },
+    async postCard() {
+      return { resource_id: CARD_ID };
+    },
+    async getCard() {
+      return { interactions: [{ id: "i5", action_id: "opt_1", value: "", user_id: HUMAN_ID }] };
+    },
+    async updateCard(token, cardId, blocks) {
+      updates.push({ token, cardId, blocks });
+      return {};
+    },
+  };
+  const result = await runKeylessTool(
+    "ask_human",
+    { chat_id: CHAT_ID, to: "dan", question: "Pineapple on pizza?", options: ["Yes", "No"] },
+    { rest, bearerToken: "tok", maxTotalMsOverride: 20 }
+  );
+  assert.equal(result.answer, "No");
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].cardId, CARD_ID);
+  assert.deepEqual(updates[0].blocks, [
+    { type: "section", text: "Pineapple on pizza?" },
+    { type: "section", text: "Answered: No" },
+  ]);
+});
+
+test("a failing card update never fails ask_human, and get_ask_result updates the card too", async () => {
+  const updates = [];
+  const base = {
+    async getChat() {
+      return { session: { users: [{ id: HUMAN_ID, username: "dan" }] } };
+    },
+    async postCard() {
+      return { resource_id: CARD_ID };
+    },
+  };
+  const pending = await runKeylessTool(
+    "ask_human",
+    { chat_id: CHAT_ID, to: "dan", question: "Colour?", options: ["Blue", "Green"] },
+    { rest: { ...base, async getCard() { return { interactions: [] }; } }, bearerToken: "tok", maxTotalMsOverride: 5, minEmptyPollMsOverride: 2 }
+  );
+  assert.equal(pending.status, "pending");
+
+  const failing = await runKeylessTool(
+    "get_ask_result",
+    { ask_id: pending.ask_id },
+    {
+      rest: {
+        async getCard() { return { interactions: [{ id: "t1", action_id: "opt_1" }] }; },
+        async updateCard() { throw new Error("403 nope"); },
+      },
+      bearerToken: "tok",
+    }
+  );
+  assert.equal(failing.answer, "Green", "the answer is returned even though the card update failed");
+
+  await runKeylessTool(
+    "get_ask_result",
+    { ask_id: pending.ask_id },
+    {
+      rest: {
+        async getCard() { return { interactions: [{ id: "t1", action_id: "opt_0" }] }; },
+        async updateCard(token, cardId, blocks) { updates.push(blocks); return {}; },
+      },
+      bearerToken: "tok",
+    }
+  );
+  assert.deepEqual(updates[0], [{ type: "section", text: "Colour?" }, { type: "section", text: "Answered: Blue" }]);
+});
+
 test("get_ask_result refuses a malformed ask_id", async () => {
   await assert.rejects(() => runKeylessTool("get_ask_result", { ask_id: "not-base64-json" }, { rest: {}, bearerToken: "tok" }), /isn't valid or has expired/);
 });

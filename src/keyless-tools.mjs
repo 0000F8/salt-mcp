@@ -93,6 +93,24 @@ function answerFromInteraction(actionMap, interaction) {
   return result;
 }
 
+/**
+ * Best-effort: once an ask has been answered, rewrite its card to the question
+ * plus "Answered: <answer>" so the person sees their tap registered (same
+ * shape the SDKs write). Never throws and never fails the tool -- the agent
+ * already has its answer. Skipped when the ask_id predates `question`.
+ */
+async function markCardAnswered(rest, bearerToken, cardId, question, answer) {
+  if (!cardId || typeof question !== "string" || !question) return;
+  try {
+    await rest.updateCard(bearerToken, cardId, [
+      { type: "section", text: question.slice(0, 2000) },
+      { type: "section", text: `Answered: ${String(answer).slice(0, 200)}` },
+    ]);
+  } catch {
+    // The card stays as it was; the answer is still returned.
+  }
+}
+
 function findMemberByHandle(members, handle) {
   const needle = String(handle || "").trim().toLowerCase().replace(/^@/, "");
   return (Array.isArray(members) ? members : []).find((m) => String(m.username || "").toLowerCase() === needle);
@@ -418,10 +436,12 @@ async function askHuman(rest, bearerToken, input, ctx) {
   // The ask_id is opaque to the model: just enough to resume this exact
   // poll later (the card, its option map, and the newest interaction id
   // already seen -- `after`, never the old outbox's numeric cursor).
-  const askId = encodeAskId({ cardId, actionMap, after: poll.cursor ?? null });
+  const askId = encodeAskId({ cardId, actionMap, question: question.slice(0, 2000), after: poll.cursor ?? null });
   if (!poll.found) return { status: "pending", ask_id: askId };
 
-  return { ...answerFromInteraction(actionMap, poll.body), ask_id: askId };
+  const answered = answerFromInteraction(actionMap, poll.body);
+  await markCardAnswered(rest, bearerToken, cardId, question.slice(0, 2000), answered.answer);
+  return { ...answered, ask_id: askId };
 }
 
 async function getAskResult(rest, bearerToken, input, ctx) {
@@ -436,9 +456,11 @@ async function getAskResult(rest, bearerToken, input, ctx) {
     minEmptyPollMs: ctx?.minEmptyPollMsOverride ?? MIN_EMPTY_POLL_MS,
     matches: (interaction) => Object.prototype.hasOwnProperty.call(actionMap, interaction?.action_id),
   });
-  const nextAskId = encodeAskId({ cardId: state.cardId, actionMap, after: poll.cursor ?? state.after ?? null });
+  const nextAskId = encodeAskId({ cardId: state.cardId, actionMap, question: state.question, after: poll.cursor ?? state.after ?? null });
   if (!poll.found) return { status: "pending", ask_id: nextAskId };
-  return { ...answerFromInteraction(actionMap, poll.body), ask_id: nextAskId };
+  const answered = answerFromInteraction(actionMap, poll.body);
+  await markCardAnswered(rest, bearerToken, state.cardId, state.question, answered.answer);
+  return { ...answered, ask_id: nextAskId };
 }
 
 async function requestPayment(rest, bearerToken, input, ctx) {
