@@ -700,6 +700,7 @@ export const KEYLESS_TOOLS = [
     title: "Ask Human",
     description:
       "Posts a card with option buttons restricted to one chosen chat member, then waits (up to ~50s) for their tap. " +
+      "Get chat_id from open_chat (with the human's @handle; the person who connected this app is reachable that way) or list_chats first. " +
       "Returns their answer, or {status: 'pending', ask_id} to keep checking later with get_ask_result. " +
       `${KEYLESS_NOTE}`,
     scope: SCOPES.CHAT,
@@ -893,6 +894,17 @@ export function toKeylessMcpTools(tools = KEYLESS_TOOLS) {
     if (tool.ui?.resourceUri) mcpTool._meta = { ui: { resourceUri: tool.ui.resourceUri } };
     return mcpTool;
   });
+}
+
+/**
+ * The keyless tools a token's granted scopes can actually use: a chat-only
+ * connection is not shown the payment, invoice and product tools, which would
+ * only fail when called. Listing is a courtesy, not the gate -- calling a
+ * hidden tool anyway still reaches salt-api and gets its scope refusal.
+ */
+export function keylessToolsForScopes(scopes, tools = KEYLESS_TOOLS) {
+  const granted = Array.isArray(scopes) ? scopes : [];
+  return tools.filter((tool) => !tool.scope || granted.includes(tool.scope));
 }
 
 /**

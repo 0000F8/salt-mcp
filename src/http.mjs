@@ -54,7 +54,7 @@ import pkg from "salt-agent-sdk";
 import { toMcpTools } from "./annotations.mjs";
 import { loadOAuthConfig, registerProtectedResourceRoutes, extractBearerToken, sendUnauthorized, sendInvalidToken } from "./oauth.mjs";
 import { createSaltBearerClient } from "./salt-bearer-client.mjs";
-import { KEYLESS_TOOLS, toKeylessMcpTools, runKeylessTool } from "./keyless-tools.mjs";
+import { KEYLESS_TOOLS, toKeylessMcpTools, keylessToolsForScopes, runKeylessTool } from "./keyless-tools.mjs";
 import { CARD_UI_RESOURCE_URI, CARD_UI_MIME_TYPE, renderCardAppHtml } from "./card-ui.mjs";
 import { createTokenValidator } from "./token-validator.mjs";
 import { validateAgainstSchema } from "./validate-input.mjs";
@@ -189,7 +189,9 @@ export function createApp({ host, fetchImpl, oauthConfig, env, rateLimiter, rate
       { name: "salt-mcp-keyless", version: PACKAGE_VERSION },
       { capabilities: { tools: {}, resources: {} } }
     );
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toKeylessMcpTools() }));
+    server.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: toKeylessMcpTools(keylessToolsForScopes(requestCtx.grant?.scopes)),
+    }));
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       const tool = KEYLESS_TOOLS.find((t) => t.name === name);

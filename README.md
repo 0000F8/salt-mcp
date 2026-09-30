@@ -142,6 +142,57 @@ MCP client) all configure the **local (stdio) server** with one Salt agent
 identity's own credentials — for the hosted OAuth or legacy-header remote
 instead, skip to "Hosted server" further down.
 
+### Any MCP SDK client
+
+A script or your own agent can connect with the official SDK. Salt takes public clients only (`token_endpoint_auth_method: "none"`), so there is no secret to keep; the SDK does discovery, dynamic registration and PKCE for you. Use a loopback redirect URI.
+
+```js
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import http from "node:http";
+
+const CALLBACK = "http://localhost:8765/callback";
+let clientInfo, tokens, verifier;
+const authProvider = {
+  redirectUrl: CALLBACK,
+  clientMetadata: {
+    client_name: "My agent",
+    redirect_uris: [CALLBACK],
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+  },
+  clientInformation: () => clientInfo,
+  saveClientInformation: (info) => { clientInfo = info; },
+  tokens: () => tokens,
+  saveTokens: (t) => { tokens = t; },
+  saveCodeVerifier: (v) => { verifier = v; },
+  codeVerifier: () => verifier,
+  redirectToAuthorization: (url) => console.log("Open this and allow:", url.toString()),
+};
+
+const code = new Promise((resolve) => {
+  http.createServer((req, res) => {
+    res.end("You can close this tab.");
+    resolve(new URL(req.url, CALLBACK).searchParams.get("code"));
+  }).listen(8765);
+});
+
+const transport = new StreamableHTTPClientTransport(new URL("https://mcp.saltapp.ai/mcp"), { authProvider });
+const client = new Client({ name: "my-agent", version: "1.0.0" });
+try {
+  await client.connect(transport);
+} catch (err) {
+  if (!(err instanceof UnauthorizedError)) throw err;
+  await transport.finishAuth(await code); // exchange the code (PKCE verifier is sent by the SDK)
+  await client.connect(new StreamableHTTPClientTransport(new URL("https://mcp.saltapp.ai/mcp"), { authProvider }));
+}
+console.log((await client.listTools()).tools.map((t) => t.name));
+```
+
+The person who opens the link needs a Salt account (https://saltapp.ai/signup). On the consent page they choose `chat`, and `money` if they have a wallet. Then call `open_chat` with their handle to get a `chat_id`, and `ask_human` to put a question to them.
+
 ### Claude Code plugin
 
 ```

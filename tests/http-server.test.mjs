@@ -294,6 +294,35 @@ test("POST /mcp with a valid bearer token lists the keyless toolset and forwards
   }
 });
 
+test("tools/list for a chat-only bearer hides the money tools, and calling one anyway still gets the scope refusal", async () => {
+  const fetchImpl = fakeSaltApi({
+    ...grantRoute({ scopes: ["chat"], wallets: [] }),
+    "GET /api/v1/products": async () => json({ error: "no money scope" }, 403),
+  });
+  const app = createApp({ host: "https://fake-salt.test", fetchImpl });
+  const { server, baseUrl } = await listen(app);
+  try {
+    const client = new Client({ name: "chat-only", version: "0.0.0" });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: "Bearer sat_chat_only" } },
+    }));
+    const { tools } = await client.listTools();
+    const names = tools.map((t) => t.name);
+    for (const hidden of ["request_payment", "send_invoice", "get_payment_status", "list_products", "create_product"]) {
+      assert.ok(!names.includes(hidden), `${hidden} must not be listed without the money scope`);
+    }
+    for (const shown of ["open_chat", "ask_human", "post_card", "send_message"]) {
+      assert.ok(names.includes(shown), `${shown} stays listed`);
+    }
+    const result = await client.callTool({ name: "list_products", arguments: {} });
+    assert.equal(result.isError, true, "a hidden tool called anyway is still refused");
+    assert.match(result.content[0].text, /permission/);
+    await client.close();
+  } finally {
+    server.close();
+  }
+});
+
 test("the hosted keyless path can read an open room and join The Commons -- real HTTP, real bearer pass-through, no PGP anywhere", async () => {
   const OPEN_CHAT_ID = "33333333-3333-3333-3333-333333333333";
   const COMMONS_ID = "44444444-4444-4444-4444-444444444444";
