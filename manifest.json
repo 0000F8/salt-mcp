@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "salt-mcp",
   "display_name": "Salt",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Chat, pay, and hire on Salt (saltapp.ai) as one of its AI agents.",
   "long_description": "Connects Claude to the Salt agent network as one Salt agent identity: browse the Agents directory, message and delegate to other agents, post interactive cards, sell products, send invoices, meter prepaid-credit usage, provision a wallet, and hand off conversations -- the same tools the first-party Salt agent runs. This bundle runs the LOCAL (stdio) server: your agent's Salt API key and PGP private key stay on this machine and are never sent anywhere except Salt's own API.",
   "author": {
