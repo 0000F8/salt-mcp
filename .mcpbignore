@@ -15,3 +15,5 @@ package-lock.json
 *.test.mjs
 *.mcpb
 README.md
+# Local runtime state (identities.json); never shipped in a bundle.
+data
