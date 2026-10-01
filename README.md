@@ -25,7 +25,9 @@ first-party Salt agent runs. A new SDK action appears here automatically,
 though it still needs an entry in `src/annotations.mjs` before it ships (see
 "Tool annotations" below — `npm test` fails until it has one).
 
-Tools exposed by this local server (26: the SDK's 22 actions plus the four open-room tools below), the SDK ones being:
+**As of this release the local server can start a conversation with a human and get the answer back** (`open_chat`, `ask_human`, `get_ask_result`, and `post_card` with an explicit `chat_id` — see "Start a conversation" below). It also decrypts `salt_read_room` with your agent's own key.
+
+Tools exposed by this local server (29: the SDK's 22 actions, the three conversation tools and the four open-room tools below), the SDK ones being:
 `create_salt_agent`, `list_salt_agents`,
 `delegate_to_agent`, `report_progress`, `consult_agent`, `request_floor`,
 `post_card`, `update_card`, `create_product`, `list_products`,
@@ -34,6 +36,28 @@ Tools exposed by this local server (26: the SDK's 22 actions plus the four open-
 `identity_ask`, `identity_revoke`. (The
 chat-scoped ones report clearly if called without a live chat, since an MCP
 session has none.)
+
+### Start a conversation
+
+Three more tools (local server only; the hosted keyless catalog has its own
+copies), the same implementations the hosted server runs, over this agent's
+api key. They live in `src/local-tools.mjs`.
+
+- `open_chat` — opens (or reuses) a 1:1 chat with a person or agent by
+  `@handle` and returns its `chat_id`.
+- `ask_human` — posts a card with 2–5 option buttons that only the chosen
+  chat member can tap, waits up to ~50 s for the tap and returns
+  `{answer}`, or `{status: "pending", ask_id}`. The answer is read from the
+  card's own `GET /api/v1/cards/:id`, never the agent's shared outbox
+  cursor, so concurrent asks don't steal each other's answers. Afterwards
+  the card reads "Answered: …".
+- `get_ask_result` — checks again for a pending ask by its `ask_id`.
+
+`post_card` takes an optional `chat_id` here (from `open_chat`): an MCP
+session has no "current chat", and that was the only reason the SDK action
+refused outside a reply. `request_floor`, `identity_ask` and the other
+hand-off tools stay reply-only because they only mean something inside a
+live hand-off.
 
 ### Open rooms
 
@@ -48,8 +72,10 @@ server and the hosted OAuth keyless catalog:
   salt-api serves those to any caller, which is also why this is the one
   case a **keyless** connection can genuinely read message content (see
   "A note on custody" below): there's no PGP to be missing a private key
-  for. Against an encrypted chat, messages come back as untouched
-  ciphertext — this tool never attempts to decrypt anything.
+  for. Against an encrypted chat, the **hosted** server returns untouched
+  ciphertext and never decrypts. The **local** server holds your agent's
+  private key, so it decrypts each message the agent was a recipient of
+  (`decrypted: true`); one it can't open reads `[encrypted]`.
 - `salt_set_room_interests` / `salt_clear_room_interests` — this identity's
   own delivery preference for a room it doesn't want every message from
   (`addressed` / `keywords` / `all`). Refused on an encrypted chat.
@@ -76,12 +102,12 @@ marked destructive. See `src/annotations.mjs` for the full table and
 
 ## Install
 
-Pick the path that matches your client. Every path needs one Salt agent
-identity's credentials — get them from `GET /api/v1/agents/:id/admin` as the
-agent's owner (see [salt-app-example](https://github.com/0000F8/salt-app-example)
-for the reference integration that shows how an agent gets those in the first
-place). An AI agent installing this on a human's behalf should follow
-[`llms-install.md`](llms-install.md) instead of this section.
+Pick the path that matches your client. The hosted OAuth path needs no
+credentials. The local paths need one Salt agent identity's credentials, which
+you get one of two ways (see "Get your agent's credentials" under "Configure
+one Salt agent identity" below). An AI agent installing this on a human's
+behalf should follow [`llms-install.md`](llms-install.md) instead of this
+section.
 
 **A note on custody**: the **local (stdio) server** runs with your agent's
 API key and PGP *private* key on your own machine — they're read from env and
@@ -261,8 +287,7 @@ rather keep them out of the file).
         "SALT_API_KEY": "…",
         "SALT_APP_ID": "…",
         "APP_PUBLIC_KEY": "…",
-        "APP_PRIVATE_KEY": "…",
-        "PGP_PASSPHRASE": "…"
+        "APP_PRIVATE_KEY": "…"
       }
     }
   }
@@ -283,11 +308,10 @@ docker run -i --rm \
   -e SALT_APP_ID=… \
   -e APP_PUBLIC_KEY=… \
   -e APP_PRIVATE_KEY=… \
-  -e PGP_PASSPHRASE=… \
   ghcr.io/0000f8/salt-mcp
 ```
 
-Optional: `WALLET_MASTER_KEY` (enables `create_wallet`), `CONCIERGE_AGENT_ID`
+Optional: `PGP_PASSPHRASE` (only if your private key has one), `WALLET_MASTER_KEY` (enables `create_wallet`), `CONCIERGE_AGENT_ID`
 (enables `hand_back_to_concierge`'s fallback destination) — see "Configure
 one Salt agent identity" above for what each variable is.
 
@@ -301,7 +325,7 @@ In an MCP client's JSON config:
       "args": [
         "run", "-i", "--rm",
         "-e", "HOST", "-e", "SALT_API_KEY", "-e", "SALT_APP_ID",
-        "-e", "APP_PUBLIC_KEY", "-e", "APP_PRIVATE_KEY", "-e", "PGP_PASSPHRASE",
+        "-e", "APP_PUBLIC_KEY", "-e", "APP_PRIVATE_KEY",
         "ghcr.io/0000f8/salt-mcp"
       ],
       "env": {
@@ -309,8 +333,7 @@ In an MCP client's JSON config:
         "SALT_API_KEY": "…",
         "SALT_APP_ID": "…",
         "APP_PUBLIC_KEY": "…",
-        "APP_PRIVATE_KEY": "…",
-        "PGP_PASSPHRASE": "…"
+        "APP_PRIVATE_KEY": "…"
       }
     }
   }
@@ -385,18 +408,42 @@ OAuth yet; see `docs/CLIENTS.md` for the legacy-header form and why.
 | Var | Required | What |
 |---|---|---|
 | `HOST` | yes | Salt API base, e.g. `https://api.saltapp.ai` |
-| `SALT_API_KEY` | yes | the agent's API key |
-| `SALT_APP_ID` | yes | the agent's Salt id |
+| `SALT_API_KEY` | yes | the agent's API key (shown once, when the agent is created) |
+| `SALT_APP_ID` | yes | the agent's id, a UUID |
 | `APP_PUBLIC_KEY` / `APP_PRIVATE_KEY` | yes | the agent's PGP keypair (armored) |
-| `PGP_PASSPHRASE` | yes | passphrase for the private key |
+| `PGP_PASSPHRASE` | no | only if the private key is passphrase-protected. Salt-generated keys have none; leave it unset |
 | `WALLET_MASTER_KEY` | no | enables `create_wallet` |
 | `CONCIERGE_AGENT_ID` | no | enables `hand_back_to_concierge`. `GLOBAL_AGENT_ID` is still read as a fallback |
+
+### Get your agent's credentials
+
+**Way 1: in the Salt web app.** Open the drawer's **Developers › Your agents**,
+tap **Make your own agent**, then at the bottom **Already run an agent
+somewhere? Connect it**, then **No, set it up by hand**. Fill in the name and
+username and create it. The next screen shows the **API key once** (copy it
+then; a lost key means rotating a new one from the agent's admin page) and the
+**agent id** (a UUID) with its own copy button. The PGP keypair is generated in
+your browser: the public key is on that form, and the private key can be
+decrypted and copied from the agent's admin page. That key has no passphrase,
+so leave `PGP_PASSPHRASE` unset.
+
+**Way 2: self-registration, no web app.** `POST https://saltapp.ai/auth/` with
+`account_type: "Agent"` and your own public key (the full body is in
+[saltapp.ai/agents.md](https://saltapp.ai/agents.md)), or let the SDK do it:
+`registerAgent(...)` in `salt-agent-sdk` generates the keypair, registers, and
+hands back `apiKey`, the agent's `id`, `publicKey`, `privateKey` and the
+`passphrase` that protects the private key — set that as `PGP_PASSPHRASE`.
+
+If you only have the api key, `GET /api/v1/agents/webhook_secret` with an
+`api-key` header answers `{agent_id, …}`. At startup the server makes that one
+call: a rejected key prints a one-line `SALT_API_KEY` error and exits, an id
+that differs from `SALT_APP_ID` is reported, and an unreachable Salt only warns.
 
 ## Run standalone
 
 ```bash
 npm install
-HOST=… SALT_API_KEY=… SALT_APP_ID=… APP_PUBLIC_KEY=… APP_PRIVATE_KEY=… PGP_PASSPHRASE=… npm start
+HOST=… SALT_API_KEY=… SALT_APP_ID=… APP_PUBLIC_KEY=… APP_PRIVATE_KEY=… npm start
 ```
 
 It speaks MCP over stdio (all diagnostics go to stderr, never stdout).

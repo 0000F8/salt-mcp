@@ -20,7 +20,7 @@ detail.
 
 **Two different connectors, two different tool catalogs.** Everything below
 describes the FULL identity — the local stdio server or `salt-agent-sdk`
-directly, where you hold a real PGP private key and get the whole 26-tool
+directly, where you hold a real PGP private key and get the whole 29-tool
 catalog. If you were instead connected over `https://mcp.saltapp.ai/mcp`
 through **OAuth** (an `Authorization: Bearer` token, no private key anywhere
 for you), stop and read `references/keyless-remote.md` instead — your

@@ -77,10 +77,26 @@ function shapeSubscription(chatId, mode, result) {
   };
 }
 
+// Local mode only (an optional `decrypt` is passed): an encrypted message
+// this agent was a recipient of is opened with its own key; any message it
+// can't open (not a recipient, wrong key, not armor) reads "[encrypted]"
+// rather than failing the whole read. The hosted server never passes
+// `decrypt`, so it keeps returning ciphertext untouched.
+export const UNREADABLE_TEXT = "[encrypted]";
+
+async function openMessage(summary, decrypt) {
+  if (!decrypt || !summary.encrypted || !summary.text) return summary;
+  try {
+    return { ...summary, text: await decrypt(summary.text), decrypted: true };
+  } catch {
+    return { ...summary, text: UNREADABLE_TEXT, decrypted: false };
+  }
+}
+
 /**
- * @param {{request: (method: string, path: string, body?: object) => Promise<any>}} deps
+ * @param {{request: (method: string, path: string, body?: object) => Promise<any>, decrypt?: (armored: string) => Promise<string>}} deps
  */
-export function createRoomTools({ request }) {
+export function createRoomTools({ request, decrypt }) {
   return {
     /** GET /api/v1/chats/:id[?last=] -- see resolve_readable_chat/show on
      *  salt-api: a PUBLIC, UNENCRYPTED room answers this for ANY caller,
@@ -106,7 +122,7 @@ export function createRoomTools({ request }) {
         member: session.member !== false,
         member_count:
           typeof session.member_count === "number" ? session.member_count : Array.isArray(session.users) ? session.users.length : null,
-        messages: messages.map(summarizeMessage),
+        messages: await Promise.all(messages.map((m) => openMessage(summarizeMessage(m), decrypt))),
       };
     },
 
@@ -194,6 +210,7 @@ export const ROOM_TOOL_METADATA = [
               seq: { type: ["number", "null"] },
               encrypted: { type: "boolean" },
               text: { type: "string" },
+              decrypted: { type: "boolean", description: "Local server only: true when this agent's key opened the message." },
               sender: { type: ["object", "null"] },
               created_at: { type: ["string", "null"] },
             },
@@ -271,22 +288,28 @@ const ROOM_TOOL_HANDLERS = {
  *  its own auth-bound `request`. Throws for any other tool name; callers
  *  check ROOM_TOOL_NAMES first (or catch and fall through, as fits their
  *  own dispatch shape). */
-export async function runRoomTool(name, args, { request }) {
+export async function runRoomTool(name, args, { request, decrypt }) {
   const handler = ROOM_TOOL_HANDLERS[name];
   if (!handler) throw new Error(`Tool "${name}" is not a room tool.`);
-  return handler(createRoomTools({ request }), args ?? {});
+  return handler(createRoomTools({ request, decrypt }), args ?? {});
 }
 
 /** Maps ROOM_TOOL_METADATA to plain MCP Tool objects -- for src/index.mjs's
  *  ListTools handler, alongside toMcpTools(actions.definitions). Mirrors
  *  keyless-tools.mjs's toKeylessMcpTools() shape (title folded into
  *  annotations too, same as that function does). */
-export function toRoomMcpTools() {
+const LOCAL_READ_ROOM_DESCRIPTION =
+  "Reads recent messages from a Salt chat by id -- the newest window, or after `last` (a message id already seen) for the next page. " +
+  "Open, public rooms are readable without membership. For an encrypted chat this agent is in, each message is decrypted with this " +
+  "agent's own key (`decrypted: true`); one it can't open reads \"[encrypted]\".";
+
+/** `{decrypts: true}` is the local server, which holds the agent's key and says so in salt_read_room's description. */
+export function toRoomMcpTools({ decrypts = false } = {}) {
   return ROOM_TOOL_METADATA.map((meta) => {
     const tool = {
       name: meta.name,
       title: meta.title,
-      description: meta.description,
+      description: decrypts && meta.name === "salt_read_room" ? LOCAL_READ_ROOM_DESCRIPTION : meta.description,
       inputSchema: meta.inputSchema,
       annotations: { title: meta.title, ...meta.annotations },
     };

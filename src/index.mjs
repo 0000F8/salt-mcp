@@ -24,6 +24,9 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import pkg from "salt-agent-sdk";
 import { toMcpTools } from "./annotations.mjs";
 import { createApiKeyRequest, toRoomMcpTools, runRoomTool, ROOM_TOOL_NAMES } from "./room-tools.mjs";
+import { LOCAL_TOOL_NAMES, toLocalMcpTools, createLocalRest, runLocalTool } from "./local-tools.mjs";
+import { createDecryptor } from "./local-decrypt.mjs";
+import { checkCredentials } from "./startup-check.mjs";
 
 const {
   loadSaltAgentConfig,
@@ -65,6 +68,60 @@ export function buildActionsOptions(config, { client, identities }) {
   };
 }
 
+const PLAIN_ID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)$/;
+
+// post_card is an SDK action that posts into the CURRENT chat of a reply
+// (`ctx.mainChatId`) -- there is no safety reason behind that, an MCP session
+// just has no current chat. Here the caller names the chat instead: `chat_id`
+// (from open_chat) becomes that context for this one call, still posting as
+// this agent through its own api key.
+function withChatIdForPostCard(tool) {
+  return {
+    ...tool,
+    description:
+      tool.description.replace("into the CURRENT chat", "into the chat named by `chat_id`") +
+      " In this local server, pass `chat_id` (from open_chat).",
+    inputSchema: {
+      ...tool.inputSchema,
+      properties: { ...tool.inputSchema.properties, chat_id: { type: "string", description: "The chat to post into (from open_chat)." } },
+    },
+  };
+}
+
+/**
+ * The local server's whole tool surface as two functions, so tests can drive
+ * it without stdio. `decrypt` opens messages for salt_read_room (omit it and
+ * ciphertext comes back untouched, as on the hosted server).
+ */
+export function createLocalHandlers({ actions, caller, host, decrypt, fetchImpl }) {
+  const roomRequest = createApiKeyRequest({ host, apiKey: caller.apiKey, fetchImpl });
+  const rest = createLocalRest({ host, fetchImpl });
+  return {
+    toolCount: actions.definitions.length + LOCAL_TOOL_NAMES.size + ROOM_TOOL_NAMES.size,
+    listTools() {
+      const sdkTools = toMcpTools(actions.definitions).map((t) => (t.name === "post_card" ? withChatIdForPostCard(t) : t));
+      return [...sdkTools, ...toLocalMcpTools(), ...toRoomMcpTools({ decrypts: Boolean(decrypt) })];
+    },
+    async callTool(name, args = {}, extra = {}) {
+      if (ROOM_TOOL_NAMES.has(name)) return runRoomTool(name, args, { request: roomRequest, decrypt });
+      if (LOCAL_TOOL_NAMES.has(name)) return runLocalTool(name, args, { rest, apiKey: caller.apiKey, ...extra });
+      // No chat context in an MCP session -- depth 0, mainChatId null. Actions
+      // that require a live chat (delegate_to_agent, hand_off_*, ...) report
+      // that clearly rather than misbehave; post_card takes it as `chat_id`.
+      let mainChatId = null;
+      if (name === "post_card") {
+        const { chat_id: chatId, ...rest2 } = args;
+        const id = typeof chatId === "string" ? chatId.trim() : "";
+        if (!id) throw new Error("post_card needs a chat_id here -- open one with open_chat first.");
+        if (!PLAIN_ID_RE.test(id)) throw new Error(`chat_id must be a plain Salt id (a uuid or an integer) -- refusing "${id.slice(0, 60)}".`);
+        mainChatId = id;
+        args = rest2;
+      }
+      return actions.execute(name, args, caller, { depth: 0, mainChatId });
+    },
+  };
+}
+
 // Everything below has real side effects (reads env, may process.exit,
 // speaks MCP over stdio) so it only runs when this file is the process
 // entry point -- never on import, e.g. from a test.
@@ -94,33 +151,31 @@ async function main() {
 
   const actions = createActions(buildActionsOptions(config, { client, identities }));
 
-  // Open rooms (2026-09-22): salt_read_room/salt_set_room_interests/
-  // salt_clear_room_interests/salt_join_commons aren't salt-agent-sdk
-  // actions (createActions doesn't cover rooms yet), so they're not on
-  // `actions` above -- see src/room-tools.mjs, shared with the hosted
-  // OAuth keyless catalog's own copy of these same four tools
-  // (src/keyless-tools.mjs). This identity's own api-key is the auth this
-  // surface has, same header createSaltClient sends everywhere else.
-  const roomRequest = createApiKeyRequest({ host: config.host, apiKey: caller.apiKey });
+  // Fail on a bad api key here, not as a 401 on the first tool call. A network
+  // failure only warns: an offline launch should still come up.
+  const check = await checkCredentials({ host: config.host, apiKey: caller.apiKey, appId: config.saltAppId });
+  if (check.status === "unauthorized") {
+    log(`ERROR: ${check.message}`);
+    process.exit(1);
+  }
+  if (check.status !== "ok" || check.mismatch) log(`WARNING: ${check.message}`);
+
+  // Local mode holds this agent's private key, so salt_read_room can open
+  // the encrypted messages it was a recipient of.
+  const decrypt = caller.privateKey ? createDecryptor({ privateKey: caller.privateKey, passphrase: config.pgpPassphrase }) : undefined;
+  const handlers = createLocalHandlers({ actions, caller, host: config.host, decrypt });
 
   const server = new Server(
     { name: "salt-mcp", version: PACKAGE_VERSION },
     { capabilities: { tools: {} } }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [...toMcpTools(actions.definitions), ...toRoomMcpTools()],
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: handlers.listTools() }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
-      // No chat context in an MCP session -- depth 0, mainChatId null. Actions
-      // that require a live chat (delegate_to_agent, post_card, hand_off_*)
-      // will report that clearly rather than misbehave.
-      const result = ROOM_TOOL_NAMES.has(name)
-        ? await runRoomTool(name, args ?? {}, { request: roomRequest })
-        : await actions.execute(name, args ?? {}, caller, { depth: 0, mainChatId: null });
+      const result = await handlers.callTool(name, args ?? {});
       const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
       return { content: [{ type: "text", text }] };
     } catch (err) {
@@ -133,7 +188,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log(`ready as agent #${config.saltAppId} (${config.host}); ${actions.definitions.length + ROOM_TOOL_NAMES.size} tools exposed`);
+  log(`ready as agent #${config.saltAppId} (${config.host}); ${handlers.toolCount} tools exposed${check.status === "ok" ? "" : " (credentials not verified)"}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -60,7 +60,7 @@ test("server.json claims no package until salt-mcp is actually on npm; when it d
   assert.notEqual(npmPackage.version, "latest", "package version must be a specific version, not a range or 'latest'");
 
   const envByName = Object.fromEntries((npmPackage.environmentVariables || []).map((e) => [e.name, e]));
-  const requiredSecrets = ["SALT_API_KEY", "APP_PRIVATE_KEY", "PGP_PASSPHRASE"];
+  const requiredSecrets = ["SALT_API_KEY", "APP_PRIVATE_KEY"];
   for (const name of requiredSecrets) {
     assert.ok(envByName[name], `missing environment variable ${name}`);
     assert.equal(envByName[name].isRequired, true, `${name} should be required`);
@@ -107,4 +107,18 @@ test("server.json lists the hosted streamable-http remote with an OAuth bearer h
 test("server.json's description fits the registry's 100-character limit", () => {
   const serverJson = readServerJson();
   assert.ok(serverJson.description.length <= 100, `description is ${serverJson.description.length} chars, limit is 100`);
+});
+
+test("server.json carries icons and a job-naming description of at most 100 characters; PGP_PASSPHRASE is optional", () => {
+  const serverJson = readServerJson();
+  assert.ok(serverJson.description.length <= 100, `description is ${serverJson.description.length} chars`);
+  assert.doesNotMatch(serverJson.description, /\bpeople\b/i);
+  const byType = Object.fromEntries((serverJson.icons || []).map((i) => [i.mimeType, i]));
+  assert.equal(byType["image/png"]?.src, "https://saltapp.ai/logo512.png");
+  assert.deepEqual(byType["image/png"]?.sizes, ["512x512"]);
+  assert.equal(byType["image/svg+xml"]?.src, "https://saltapp.ai/favicon.svg");
+  for (const pkg of serverJson.packages || []) {
+    const pgp = (pkg.environmentVariables || []).find((e) => e.name === "PGP_PASSPHRASE");
+    if (pgp) assert.equal(pgp.isRequired, false);
+  }
 });

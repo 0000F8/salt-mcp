@@ -9,7 +9,7 @@
         "SALT_APP_ID": "${SALT_APP_ID}",
         "APP_PUBLIC_KEY": "${APP_PUBLIC_KEY}",
         "APP_PRIVATE_KEY": "${APP_PRIVATE_KEY}",
-        "PGP_PASSPHRASE": "${PGP_PASSPHRASE}",
+        "PGP_PASSPHRASE": "${PGP_PASSPHRASE:-}",
         "WALLET_MASTER_KEY": "${WALLET_MASTER_KEY:-}",
         "CONCIERGE_AGENT_ID": "${CONCIERGE_AGENT_ID:-}"
       }

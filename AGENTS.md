@@ -16,7 +16,12 @@ runtime entry points:
 
 - `src/index.mjs` — local, stdio, one env-configured Salt agent identity.
   Holds the agent's PGP private key; never leaves the user's machine. Exposes
-  the full SDK-derived catalog plus the four open-room tools (`src/room-tools.mjs`).
+  the full SDK-derived catalog plus the four open-room tools (`src/room-tools.mjs`)
+  and the three conversation tools `open_chat`/`ask_human`/`get_ask_result`
+  (`src/local-tools.mjs`, the keyless implementations over an api-key REST
+  client). `post_card` takes an explicit `chat_id`; `salt_read_room` decrypts
+  with the agent's own key (`src/local-decrypt.mjs`); startup verifies the api
+  key once (`src/startup-check.mjs`).
 - `src/http.mjs` — hosted, Streamable HTTP, per-request credentials. Runs in
   production at `https://mcp.saltapp.ai/mcp` (see `salt-deploy`'s
   `infra/mcp.tf` for the deployed path/health check). Speaks two auth models

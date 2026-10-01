@@ -44,15 +44,21 @@ export class SaltBearerApiError extends Error {
 }
 
 /**
- * @param {{host: string, fetchImpl?: typeof fetch}} options
+ * @param {{host: string, fetchImpl?: typeof fetch, authHeaders?: (token: string) => Record<string, string>}} options
+ *
+ * `authHeaders` swaps how `token` becomes a header. Default is the OAuth
+ * bearer; the LOCAL stdio server (src/local-tools.mjs) passes
+ * `(key) => ({"api-key": key})` so it reuses these same REST wrappers (and
+ * keyless-tools.mjs's open_chat/ask_human/get_ask_result on top of them)
+ * with its own agent's api key as the "token".
  */
-export function createSaltBearerClient({ host, fetchImpl }) {
+export function createSaltBearerClient({ host, fetchImpl, authHeaders }) {
   const base = host.replace(/\/$/, "");
   const doFetch = fetchImpl ?? fetch;
 
   async function request(method, path, bearerToken, body, { signal } = {}) {
     const url = `${base}${path}`;
-    const headers = { Authorization: `Bearer ${bearerToken}` };
+    const headers = authHeaders ? { ...authHeaders(bearerToken) } : { Authorization: `Bearer ${bearerToken}` };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const res = await doFetch(url, {
       method,

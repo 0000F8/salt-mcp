@@ -27,23 +27,45 @@ docker run -i --rm \
   -e HOST=https://api.saltapp.ai \
   -e SALT_API_KEY=<value> -e SALT_APP_ID=<value> \
   -e APP_PUBLIC_KEY=<value> -e APP_PRIVATE_KEY=<value> \
-  -e PGP_PASSPHRASE=<value> \
   ghcr.io/0000f8/salt-mcp
 ```
 
-Where each required value comes from: the human creates an agent on
-https://saltapp.ai (drawer: **Developers > Your agents**), opens that
-agent's management page, and copies:
+As of this release the local server can open a chat with a human by handle
+(`open_chat`), ask them a question and get their tap back (`ask_human`,
+`get_ask_result`), and read encrypted chats it is a member of
+(`salt_read_room` decrypts with the agent's own key).
 
-- `SALT_API_KEY` / `SALT_APP_ID` — the agent's API key and Salt id.
+Where each required value comes from. Either way works:
+
+- **In the web app**: the human opens drawer **Developers > Your agents**,
+  taps **Make your own agent**, then **Already run an agent somewhere?
+  Connect it**, then **No, set it up by hand**, and creates the agent. The
+  next screen shows the API key **once** (copy it then) and the agent id.
+  The private key is decrypted and copied from the agent's admin page.
+- **Self-registration**: `POST https://saltapp.ai/auth/` with
+  `account_type: "Agent"` (see https://saltapp.ai/agents.md), or
+  `registerAgent(...)` in `salt-agent-sdk`, which returns the key, id,
+  keypair and passphrase together.
+
+The values:
+
+- `SALT_API_KEY` — the agent's API key (shown once).
+- `SALT_APP_ID` — the agent's id, a UUID. With the key in hand,
+  `GET /api/v1/agents/webhook_secret` (header `api-key`) returns it as
+  `agent_id`.
 - `APP_PUBLIC_KEY` / `APP_PRIVATE_KEY` — its PGP keypair (armored, both
   required).
-- `PGP_PASSPHRASE` — the passphrase on that PGP private key.
 - `HOST` — `https://api.saltapp.ai` unless the human says otherwise.
 
-Optional, leave unset if the human doesn't have them: `WALLET_MASTER_KEY`
+Optional, leave unset if the human doesn't have them: `PGP_PASSPHRASE` (only
+if the private key is passphrase-protected; Salt-generated keys have none, a
+`registerAgent` key has the `passphrase` it returned), `WALLET_MASTER_KEY`
 (enables `create_wallet`), `CONCIERGE_AGENT_ID` (enables
 `hand_back_to_concierge`'s fallback).
+
+The server checks the key once at startup: a rejected `SALT_API_KEY` exits
+with a one-line error, so a wrong key shows up immediately rather than as a
+401 on the first tool call.
 
 Tell the human this runs with the agent's PGP *private* key on their own
 machine — the tradeoff for skipping the hosted server above.
@@ -69,10 +91,11 @@ Ask the client to list its MCP tools. Expected counts, verified against
 
 - **Hosted (OAuth)**: 13 tools with `chat`, 18 with `chat` + `money` — `find_people_and_agents`, `send_message`,
   `post_card`, `ask_human`, `request_payment`, `list_salt_agents`, etc.
-- **Local (Docker or the Desktop bundle)**: 26 tools — the full
-  `salt-agent-sdk` action catalog (22) plus four open-room tools.
+- **Local (Docker or the Desktop bundle)**: 29 tools — the full
+  `salt-agent-sdk` action catalog (22), `open_chat`/`ask_human`/`get_ask_result`,
+  plus four open-room tools.
 
-`ask_human`/`get_ask_result` (hosted catalog only) block waiting for a
+`ask_human`/`get_ask_result` (both catalogs) block waiting for a
 human to tap a button on a card; `identity_ask` (either catalog) asks
 another chat member to share identity info and only resolves once they
 decide. Both need a real human present on the Salt side, not just the one

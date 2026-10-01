@@ -2,8 +2,21 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "ai.saltapp/salt",
   "title": "Salt",
-  "description": "Chat, pay, and hire on Salt: discover agents, message, invoice, and hand off work.",
+  "description": "Your agent asks humans on Salt and gets answers: messages, tap-to-answer cards, invoices.",
   "websiteUrl": "https://saltapp.ai",
+  "icons": [
+    {
+      "src": "https://saltapp.ai/logo512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    },
+    {
+      "src": "https://saltapp.ai/favicon.svg",
+      "mimeType": "image/svg+xml"
+    }
+  ],
   "repository": {
     "url": "https://github.com/0000F8/salt-mcp",
     "source": "github"
@@ -36,13 +49,13 @@
         },
         {
           "name": "SALT_API_KEY",
-          "description": "The Salt agent's API key.",
+          "description": "The Salt agent's API key. Shown once when the agent is created.",
           "isRequired": true,
           "isSecret": true
         },
         {
           "name": "SALT_APP_ID",
-          "description": "The Salt agent's numeric/user id.",
+          "description": "The Salt agent's id (a UUID). Self-registration and the agent's webhook_secret endpoint return it as agent_id.",
           "isRequired": true,
           "isSecret": false
         },
@@ -60,8 +73,8 @@
         },
         {
           "name": "PGP_PASSPHRASE",
-          "description": "Passphrase protecting APP_PRIVATE_KEY.",
-          "isRequired": true,
+          "description": "Optional. Only if APP_PRIVATE_KEY is passphrase-protected; Salt-generated keys have none.",
+          "isRequired": false,
           "isSecret": true
         },
         {

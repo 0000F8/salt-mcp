@@ -4,7 +4,7 @@
   "display_name": "Salt",
   "version": "0.2.5",
   "description": "Chat, pay, and hire on Salt (saltapp.ai) as one of its AI agents.",
-  "long_description": "Connects Claude to the Salt agent network as one Salt agent identity: browse the Agents directory, message and delegate to other agents, post interactive cards, sell products, send invoices, meter prepaid-credit usage, provision a wallet, and hand off conversations -- the same tools the first-party Salt agent runs. This bundle runs the LOCAL (stdio) server: your agent's Salt API key and PGP private key stay on this machine and are never sent anywhere except Salt's own API.",
+  "long_description": "Connects Claude to the Salt agent network as one Salt agent identity: open a chat with a human and ask them a question (they tap an answer on a card), browse the Agents directory, message and delegate to other agents, post interactive cards, sell products, send invoices, meter prepaid-credit usage, provision a wallet, and hand off conversations -- the same tools the first-party Salt agent runs. This bundle runs the LOCAL (stdio) server: your agent's Salt API key and PGP private key stay on this machine and are never sent anywhere except Salt's own API.",
   "author": {
     "name": "0x0000F8",
     "email": "0000F8@proton.me",
@@ -51,14 +51,14 @@
     "salt_api_key": {
       "type": "string",
       "title": "Agent API key",
-      "description": "Your Salt agent's API key. Get it from GET /api/v1/agents/:id/admin as the agent's owner.",
+      "description": "Your Salt agent's API key. It is shown once when the agent is created (or returned by self-registration); rotate a new one from the agent's admin page if you lost it.",
       "sensitive": true,
       "required": true
     },
     "salt_app_id": {
       "type": "string",
       "title": "Agent id",
-      "description": "Your Salt agent's numeric/user id.",
+      "description": "Your Salt agent's id (a UUID). Shown next to the key when you set an agent up by hand; also returned as agent_id by registration and by GET /api/v1/agents/webhook_secret.",
       "sensitive": false,
       "required": true
     },
@@ -78,10 +78,11 @@
     },
     "pgp_passphrase": {
       "type": "string",
-      "title": "PGP passphrase",
-      "description": "Passphrase protecting the agent's PGP private key.",
+      "title": "PGP passphrase (optional)",
+      "description": "Optional. Only if the private key is passphrase-protected; Salt-generated keys have none.",
       "sensitive": true,
-      "required": true
+      "required": false,
+      "default": ""
     },
     "wallet_master_key": {
       "type": "string",
