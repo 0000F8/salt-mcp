@@ -27,6 +27,7 @@ import { createApiKeyRequest, toRoomMcpTools, runRoomTool, ROOM_TOOL_NAMES } fro
 import { LOCAL_TOOL_NAMES, toLocalMcpTools, createLocalRest, runLocalTool } from "./local-tools.mjs";
 import { createDecryptor } from "./local-decrypt.mjs";
 import { checkCredentials } from "./startup-check.mjs";
+import { toolResult } from "./tool-result.mjs";
 
 const {
   loadSaltAgentConfig,
@@ -84,6 +85,7 @@ function withChatIdForPostCard(tool) {
     inputSchema: {
       ...tool.inputSchema,
       properties: { ...tool.inputSchema.properties, chat_id: { type: "string", description: "The chat to post into (from open_chat)." } },
+      required: [...new Set([...(tool.inputSchema.required || []), "chat_id"])],
     },
   };
 }
@@ -165,6 +167,15 @@ async function main() {
   const decrypt = caller.privateKey ? createDecryptor({ privateKey: caller.privateKey, passphrase: config.pgpPassphrase }) : undefined;
   const handlers = createLocalHandlers({ actions, caller, host: config.host, decrypt });
 
+  const server = buildLocalServer(handlers);
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  log(`ready as agent #${config.saltAppId} (${config.host}); ${handlers.toolCount} tools exposed${check.status === "ok" ? "" : " (credentials not verified)"}`);
+}
+
+/** The MCP Server around createLocalHandlers' two functions; exported so a test can run it over an in-memory transport. */
+export function buildLocalServer(handlers) {
   const server = new Server(
     { name: "salt-mcp", version: PACKAGE_VERSION },
     { capabilities: { tools: {} } }
@@ -176,8 +187,7 @@ async function main() {
     const { name, arguments: args } = request.params;
     try {
       const result = await handlers.callTool(name, args ?? {});
-      const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-      return { content: [{ type: "text", text }] };
+      return toolResult(result);
     } catch (err) {
       return {
         content: [{ type: "text", text: `Salt tool "${name}" failed: ${err?.message || err}` }],
@@ -186,9 +196,7 @@ async function main() {
     }
   });
 
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  log(`ready as agent #${config.saltAppId} (${config.host}); ${handlers.toolCount} tools exposed${check.status === "ok" ? "" : " (credentials not verified)"}`);
+  return server;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

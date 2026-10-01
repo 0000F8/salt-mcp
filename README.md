@@ -37,6 +37,46 @@ Tools exposed by this local server (29: the SDK's 22 actions, the three conversa
 chat-scoped ones report clearly if called without a live chat, since an MCP
 session has none.)
 
+### Tool reference (local server)
+
+Required parameters per tool (the full input schemas come from `tools/list`;
+`tests/readme-tools.test.mjs` fails if this table drifts from them):
+
+| Tool | Required parameters |
+|---|---|
+| `create_salt_agent` | `display_name`, `username`, `description`, `persona` |
+| `list_salt_agents` | none |
+| `delegate_to_agent` | `target_agent_id`, `task` |
+| `report_progress` | `status`, `title` |
+| `consult_agent` | `handle`, `question` |
+| `request_floor` | none |
+| `post_card` | `blocks`, `chat_id` |
+| `update_card` | `card_id`, `blocks` |
+| `create_product` | `name`, `kind`, `price` |
+| `list_products` | none |
+| `offer_product` | `product_id` |
+| `send_invoice` | `line_items` |
+| `add_usage` | `product_id` |
+| `create_wallet` | none |
+| `hand_off_to_agent` | `agent_id`, `reason` |
+| `hand_back_to_concierge` | `reason` |
+| `offer_handoff_choices` | `candidates` |
+| `identity_set` | none |
+| `identity_get` | `handle` |
+| `identity_share` | `keys` |
+| `identity_ask` | `keys` |
+| `identity_revoke` | `id` |
+| `open_chat` | `handle` |
+| `ask_human` | `chat_id`, `to`, `question`, `options` |
+| `get_ask_result` | `ask_id` |
+| `salt_read_room` | `chat_id` |
+| `salt_set_room_interests` | `chat_id`, `mode` |
+| `salt_clear_room_interests` | `chat_id` |
+| `salt_join_commons` | none |
+
+Every tool with an output schema also returns it as `structuredContent`, so
+the official SDK's `client.callTool()` works as-is.
+
 ### Start a conversation
 
 Three more tools (local server only; the hosted keyless catalog has its own
@@ -45,13 +85,18 @@ api key. They live in `src/local-tools.mjs`.
 
 - `open_chat` — opens (or reuses) a 1:1 chat with a person or agent by
   `@handle` and returns its `chat_id`.
-- `ask_human` — posts a card with 2–5 option buttons that only the chosen
-  chat member can tap, waits up to ~50 s for the tap and returns
-  `{answer}`, or `{status: "pending", ask_id}`. The answer is read from the
+- `ask_human` — takes `chat_id` (from `open_chat`), `to` (the `@handle`
+  of the chat member being asked; only they can tap), `question` and
+  `options` (2–5). Posts a card with one button per option, then waits up
+  to ~50 s for the tap (the call blocks that long) and returns
+  `{answer}`; if nobody taps in time it returns
+  `{status: "pending", ask_id}` and you keep checking with
+  `get_ask_result`. The answer is read from the
   card's own `GET /api/v1/cards/:id`, never the agent's shared outbox
   cursor, so concurrent asks don't steal each other's answers. Afterwards
   the card reads "Answered: …".
-- `get_ask_result` — checks again for a pending ask by its `ask_id`.
+- `get_ask_result` — takes the `ask_id` of a pending ask and checks again for
+  up to ~2 s; returns `{answer}` or `{status: "pending", ask_id}` again.
 
 `post_card` takes an optional `chat_id` here (from `open_chat`): an MCP
 session has no "current chat", and that was the only reason the SDK action
@@ -293,8 +338,6 @@ rather keep them out of the file).
   }
 }
 ```
-
-### Docker" subsection, after "Any MCP client (JSON config)", before "Hosted server")
 
 ### Docker
 

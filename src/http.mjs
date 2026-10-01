@@ -42,6 +42,7 @@
 
 import { readFileSync } from "node:fs";
 import express from "express";
+import { toolResult } from "./tool-result.mjs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
@@ -159,8 +160,7 @@ export function createApp({ host, fetchImpl, oauthConfig, env, rateLimiter, rate
       }
       try {
         const result = await legacyActions.execute(name, args ?? {}, caller, { depth: 0, mainChatId: null });
-        const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-        return { content: [{ type: "text", text }] };
+        return toolResult(result);
       } catch (err) {
         return { content: [{ type: "text", text: `Salt tool "${name}" failed: ${err?.message || err}` }], isError: true };
       }

@@ -72,6 +72,9 @@ function assertPlainId(value, field) {
   return s;
 }
 
+/** An outputSchema'd string field: salt-api ids and amounts may arrive as numbers; the schema says string. Absent stays absent. */
+const str = (v) => (v === undefined || v === null ? v : String(v));
+
 /**
  * Builds ask_human's/get_ask_result's `{answer, ...}` payload from one
  * matched card interaction. `transfer_request_id`/`transfer_request_status`
@@ -84,11 +87,11 @@ function assertPlainId(value, field) {
  * reuses this poll from needing its own answer-shaping code.
  */
 function answerFromInteraction(actionMap, interaction) {
-  const answer = actionMap[interaction.action_id] ?? interaction.value ?? interaction.action_id;
+  const answer = String(actionMap[interaction.action_id] ?? interaction.value ?? interaction.action_id);
   const result = { answer };
   if (interaction.transfer_request_id) {
-    result.transfer_request_id = interaction.transfer_request_id;
-    result.transfer_request_status = interaction.transfer_request_status;
+    result.transfer_request_id = str(interaction.transfer_request_id);
+    if (interaction.transfer_request_status != null) result.transfer_request_status = str(interaction.transfer_request_status);
   }
   return result;
 }
@@ -300,7 +303,7 @@ async function findPeopleAndAgents(rest, bearerToken, input) {
     if (seen.has(id)) continue;
     seen.add(id);
     results.push({
-      id: person.id,
+      id: str(person.id),
       username: person.username,
       display_name: person.display_name,
       account_type: person.account_type || (matchedAgents.includes(person) ? "Agent" : "User"),
@@ -327,7 +330,7 @@ async function openChat(rest, bearerToken, input) {
   const s = chat?.session || chat || {};
   const members = s.users || [];
   return {
-    chat_id: s.id,
+    chat_id: str(s.id),
     name: s.name || null,
     members: members.map((m) => ({ id: m.id, username: m.username, display_name: m.display_name, account_type: m.account_type })),
   };
@@ -370,7 +373,7 @@ async function sendMessage(rest, bearerToken, input) {
   }
   const ciphertext = await encryptFor(text, members.map((m) => m.public_key));
   const result = await rest.postMessage(bearerToken, chatId, ciphertext);
-  return { sent: true, message_id: result?.id ?? null };
+  return { sent: true, message_id: str(result?.id ?? null) };
 }
 
 async function postCardTool(rest, bearerToken, input) {
@@ -378,7 +381,7 @@ async function postCardTool(rest, bearerToken, input) {
   const blocks = Array.isArray(input.blocks) && input.blocks.length > 0 ? input.blocks : null;
   if (!blocks) throw new Error("blocks is required (at least one card block).");
   const result = await rest.postCard(bearerToken, chatId, blocks, input.text || "");
-  return { card_id: result?.resource_id ?? result?.id ?? null, message_id: result?.id ?? result?.message_id ?? null, blocks, text: input.text || "" };
+  return { card_id: str(result?.resource_id ?? result?.id ?? null), message_id: str(result?.id ?? result?.message_id ?? null), blocks, text: input.text || "" };
 }
 
 async function updateCardTool(rest, bearerToken, input) {
@@ -481,7 +484,7 @@ async function requestPayment(rest, bearerToken, input, ctx) {
     amount,
     message: input.message || "",
   });
-  return { request_id: request.id, status: request.status, amount: request.amount };
+  return { request_id: str(request.id), status: str(request.status), amount: str(request.amount) };
 }
 
 async function sendInvoice(rest, bearerToken, input, ctx) {
@@ -514,7 +517,7 @@ async function sendInvoice(rest, bearerToken, input, ctx) {
     lineItems,
     dueAt: input.due_date,
   });
-  return { request_id: invoice.id, amount, status: invoice.status };
+  return { request_id: str(invoice.id), amount, status: str(invoice.status) };
 }
 
 async function getPaymentStatus(rest, bearerToken, input) {
@@ -523,9 +526,9 @@ async function getPaymentStatus(rest, bearerToken, input) {
   const found = requests.find((r) => String(r.id) === requestId);
   if (!found) throw new Error("No payment request found with that id.");
   return {
-    id: found.id,
-    status: found.status,
-    amount: found.amount,
+    id: str(found.id),
+    status: str(found.status),
+    amount: str(found.amount),
     request_type: found.request_type || "request",
     last_failed_reason: found.last_failed_reason || null,
   };

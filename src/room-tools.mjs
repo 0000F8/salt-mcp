@@ -84,13 +84,25 @@ function shapeSubscription(chatId, mode, result) {
 // `decrypt`, so it keeps returning ciphertext untouched.
 export const UNREADABLE_TEXT = "[encrypted]";
 
-async function openMessage(summary, decrypt) {
+//
+// salt-api stores a message's recipient copy in `message` and, for messages
+// from before multi-recipient encryption, the sender's own copy in
+// `sender_message` (the web's resolveCiphertext picks between them by who
+// wrote it). An agent's OWN messages are therefore opened from
+// `sender_message` when `message` is not addressed to its key, so every
+// available copy is tried in turn rather than guessing ownership.
+async function openMessage(summary, decrypt, senderCopy) {
   if (!decrypt || !summary.encrypted || !summary.text) return summary;
-  try {
-    return { ...summary, text: await decrypt(summary.text), decrypted: true };
-  } catch {
-    return { ...summary, text: UNREADABLE_TEXT, decrypted: false };
+  const copies = [summary.text];
+  if (typeof senderCopy === "string" && senderCopy && senderCopy !== summary.text) copies.push(senderCopy);
+  for (const copy of copies) {
+    try {
+      return { ...summary, text: await decrypt(copy), decrypted: true };
+    } catch {
+      // try the next copy
+    }
   }
+  return { ...summary, text: UNREADABLE_TEXT, decrypted: false };
 }
 
 /**
@@ -122,7 +134,7 @@ export function createRoomTools({ request, decrypt }) {
         member: session.member !== false,
         member_count:
           typeof session.member_count === "number" ? session.member_count : Array.isArray(session.users) ? session.users.length : null,
-        messages: await Promise.all(messages.map((m) => openMessage(summarizeMessage(m), decrypt))),
+        messages: await Promise.all(messages.map((m) => openMessage(summarizeMessage(m), decrypt, m?.sender_message))),
       };
     },
 

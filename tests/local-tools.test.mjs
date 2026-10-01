@@ -167,6 +167,28 @@ test("salt_read_room (local) decrypts messages the agent was a recipient of -- p
   }
 });
 
+test("salt_read_room (local) opens the agent's OWN messages from the sender copy (sender_message), real openpgp round trip", async () => {
+  const mine = await unprotectedKey();
+  const them = await unprotectedKey();
+  // Legacy two-copy shape: `message` is for the other party only, `sender_message` is the sender's own copy.
+  const forThem = await encryptFor("what I said", [them.publicKey]);
+  const forMe = await encryptFor("what I said", [mine.publicKey]);
+  const salt = fakeSalt({
+    [`GET /api/v1/chats/${CHAT}`]: () =>
+      json({
+        session: { id: CHAT, encrypted: true },
+        messages: [
+          { id: "1", encrypted: true, message: forThem, sender_message: forMe, user: { id: "agent-1", username: "bot" } },
+          { id: "2", encrypted: true, message: forThem, sender_message: null, user: HUMAN },
+        ],
+      }),
+  });
+  const decrypt = createDecryptor({ privateKey: mine.privateKey });
+  const handlers = createLocalHandlers({ actions: buildActions(caller), caller, host: HOST, decrypt, fetchImpl: salt.fetchImpl });
+  const room = await handlers.callTool("salt_read_room", { chat_id: CHAT });
+  assert.deepEqual(room.messages.map((m) => [m.text, m.decrypted]), [["what I said", true], ["[encrypted]", false]]);
+});
+
 test("without a decryptor (the hosted server's shape) salt_read_room returns ciphertext untouched", async () => {
   const mine = await generateKeypair("pw");
   const ct = await encryptFor("secret", [mine.publicKey]);
