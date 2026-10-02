@@ -21,11 +21,11 @@
     "url": "https://github.com/0000F8/salt-mcp",
     "source": "github"
   },
-  "version": "0.2.7",
+  "version": "0.2.8",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/0000f8/salt-mcp:v0.2.7",
+      "identifier": "ghcr.io/0000f8/salt-mcp:v0.2.8",
       "runtimeHint": "docker",
       "runtimeArguments": [
         {
