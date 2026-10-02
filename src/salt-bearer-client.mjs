@@ -130,6 +130,11 @@ export function createSaltBearerClient({ host, fetchImpl, authHeaders }) {
       return request("POST", "/api/v1/messages", bearerToken, { chat_id: chatId, message });
     },
 
+    /** One emoji on a message (a toggle: the same emoji again removes it). POST /api/v1/messages/:id/reactions, on the OAuth allowlist at `chat`. */
+    async reactToMessage(bearerToken, messageId, emoji) {
+      return request("POST", `/api/v1/messages/${encodeURIComponent(messageId)}/reactions`, bearerToken, { emoji });
+    },
+
     async postCard(bearerToken, chatId, blocks, text) {
       return request("POST", "/api/v1/cards", bearerToken, { chat_id: chatId, blocks, text });
     },

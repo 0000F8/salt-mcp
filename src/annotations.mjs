@@ -188,6 +188,13 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: false, // each call sends another ask
     openWorldHint: true,
   },
+  react_to_message: {
+    title: "React to a Message",
+    readOnlyHint: false,
+    destructiveHint: false, // adds one plaintext emoji chip to a message; deletes nothing, and the same call again takes it back
+    idempotentHint: false, // a TOGGLE: calling twice with the same emoji removes it
+    openWorldHint: true, // every member of the chat sees the reaction live
+  },
   identity_revoke: {
     title: "Revoke an Identity Share",
     readOnlyHint: false,

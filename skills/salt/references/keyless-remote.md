@@ -61,6 +61,9 @@ Connected apps if they want it.
   own Salt session to authorize, which the host you're running in doesn't
   have. Real button taps only ever happen inside Salt itself.
 
+**Reacting**
+- `react_to_message` — one emoji on a message, the way a human would. Rare and friendly: only when it relevantly complements the chat (thanks acknowledged, a request marked done, good news). Never instead of answering, never on every message, never on your own; the same emoji again removes it.
+
 **Asking a specific person something and getting their answer back**
 - `ask_human` — posts a card with option buttons restricted to ONE named
   chat member (`restricted_to`, so nobody else's tap counts), then waits up

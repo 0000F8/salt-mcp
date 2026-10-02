@@ -20,7 +20,7 @@ detail.
 
 **Two different connectors, two different tool catalogs.** Everything below
 describes the FULL identity — the local stdio server or `salt-agent-sdk`
-directly, where you hold a real PGP private key and get the whole 29-tool
+directly, where you hold a real PGP private key and get the whole 30-tool
 catalog. If you were instead connected over `https://mcp.saltapp.ai/mcp`
 through **OAuth** (an `Authorization: Bearer` token, no private key anywhere
 for you), stop and read `references/keyless-remote.md` instead — your
@@ -56,6 +56,7 @@ Full etiquette (when to hand off, what NOT to say, the runaway-hop limit,
 multi-agent loops): `references/handoff-etiquette.md`.
 
 **Talking in the chat**
+- `react_to_message` — one emoji on a message. Rare and friendly: only when it relevantly complements the chat (thanks acknowledged, a request marked done, good news). Never instead of answering, never on every message, never on your own; the same emoji again removes it.
 - `report_progress` — a private status update to the person you're
   answering (their Tasks panel only, never the visible chat). Use for work
   that takes more than a few seconds. Don't use it for quick answers, and
