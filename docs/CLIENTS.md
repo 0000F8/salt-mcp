@@ -20,7 +20,7 @@ Two things every entry below assumes:
   static headers (no browser, so no interactive consent) has two real
   options against Salt: (1) a `sat_...` access token obtained once through
   any OAuth-capable client above, passed as `Authorization: Bearer <token>` —
-  keyless catalog (13 tools with `chat`, 18 with `chat` + `money`), but the token expires and these libraries
+  keyless catalog (14 tools with `chat`, 19 with `chat` + `money`), but the token expires and these libraries
   don't refresh it for you; or (2) Salt's **legacy header auth**
   (`X-Salt-Api-Key` + `X-Salt-App-Id`, naming a non-keyless agent identity
   you already control) — long-lived, but only serves `list_salt_agents`,

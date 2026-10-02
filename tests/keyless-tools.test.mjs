@@ -51,7 +51,7 @@ function toolNamed(name) {
 
 // --- catalog shape -------------------------------------------------------
 
-test("the keyless catalog matches the K5 spec's 14 tools plus the four open-room tools (2026-09-22)", () => {
+test("the keyless catalog matches the K5 spec's 15 tools plus the four open-room tools (2026-09-22)", () => {
   const expected = [
     "find_people_and_agents",
     "open_chat",
@@ -59,6 +59,7 @@ test("the keyless catalog matches the K5 spec's 14 tools plus the four open-room
     "send_message",
     "post_card",
     "update_card",
+    "react_to_message",
     "ask_human",
     "get_ask_result",
     "request_payment",
@@ -1107,4 +1108,40 @@ test("searchContacts sends username= with the leading @ stripped, so it works ag
   const result = await client.searchContacts("tok", "@ada");
   assert.equal(seenUrl, "https://salt.test/api/v1/search/contacts?username=ada");
   assert.equal(result[0].username, "ada");
+});
+
+// --- react_to_message --------------------------------------------------------
+
+test("react_to_message is a chat-scope tool carrying the owner's rule, and reacts through the bearer client", async () => {
+  const tool = toolNamed("react_to_message");
+  assert.equal(tool.scope, SCOPES.CHAT);
+  assert.match(tool.description, /relevantly complements the chat in a friendly way/);
+  assert.match(tool.description, /never to every message/i);
+  assert.equal(tool.annotations.idempotentHint, false, "a toggle is not idempotent");
+
+  const calls = [];
+  const rest = {
+    async reactToMessage(token, id, emoji) {
+      calls.push({ token, id, emoji });
+      return { message_id: id, reactions: [{ emoji, count: 1, user_ids: [HUMAN_ID] }] };
+    },
+  };
+  const out = await runKeylessTool("react_to_message", { message_id: CARD_ID, emoji: "\u2705" }, { rest, bearerToken: "tok" });
+  assert.deepEqual(calls, [{ token: "tok", id: CARD_ID, emoji: "\u2705" }]);
+  assert.equal(out.ok, true);
+  assert.equal(out.message_id, CARD_ID);
+  assert.equal(out.reactions.length, 1);
+});
+
+test("react_to_message refuses a non-plain id and turns a salt-api 403 into the chat-scope refusal", async () => {
+  const rest = {
+    async reactToMessage() {
+      throw new SaltBearerApiError("POST", "/api/v1/messages/x/reactions", 403, { error: "Connected apps can't do that." });
+    },
+  };
+  await assert.rejects(() => runKeylessTool("react_to_message", { message_id: "../agents/callback", emoji: "\u{1F44D}" }, { rest, bearerToken: "tok" }), /plain Salt id/);
+  await assert.rejects(
+    () => runKeylessTool("react_to_message", { message_id: CARD_ID, emoji: "\u{1F44D}" }, { rest, bearerToken: "tok" }),
+    /This connection wasn't given permission to do that in chat\./
+  );
 });

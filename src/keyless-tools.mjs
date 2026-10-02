@@ -392,6 +392,13 @@ async function updateCardTool(rest, bearerToken, input) {
   return { updated: true, card_id: cardId, blocks };
 }
 
+async function reactToMessageTool(rest, bearerToken, input) {
+  const messageId = assertPlainId(input.message_id, "message_id");
+  const emoji = requireString(input.emoji, "emoji");
+  const result = await rest.reactToMessage(bearerToken, messageId, emoji);
+  return { ok: true, message_id: str(result?.message_id ?? messageId), reactions: Array.isArray(result?.reactions) ? result.reactions : [] };
+}
+
 async function askHuman(rest, bearerToken, input, ctx) {
   const chatId = assertPlainId(input.chat_id, "chat_id");
   const to = requireString(input.to, "to");
@@ -719,6 +726,32 @@ export const KEYLESS_TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
     ui: { resourceUri: CARD_UI_RESOURCE_URI },
     execute: updateCardTool,
+  },
+  {
+    name: "react_to_message",
+    title: "React to a Message",
+    description:
+      "React to a message with ONE emoji. Use sparingly: not all the time, just when you choose, and only if it relevantly " +
+      "complements the chat in a friendly way (thank someone back, mark a request done with a check, celebrate good news, " +
+      "show you are on it). Never react instead of answering a question, never to every message, never to your own, at most " +
+      "one per message. Calling it again with the same emoji removes yours. message_id comes from a chat's messages " +
+      `(you can only see them in an open room, or ones your own tools returned). ${KEYLESS_NOTE}`,
+    scope: SCOPES.CHAT,
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "The id of the message to react to." },
+        emoji: { type: "string", description: "Exactly one emoji, e.g. a thumbs up or a check mark." },
+      },
+      required: ["message_id", "emoji"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: { ok: { type: "boolean" }, message_id: { type: "string" }, reactions: { type: "array" } },
+      required: ["ok", "message_id"],
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    execute: reactToMessageTool,
   },
   {
     name: "ask_human",

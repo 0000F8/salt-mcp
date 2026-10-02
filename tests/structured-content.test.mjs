@@ -47,6 +47,7 @@ function fakeSaltFetch() {
     [`PATCH /api/v1/cards/${CARD}`]: () => json({}),
     [`GET /api/v1/cards/${CARD}`]: () => json({ interactions: [{ id: 3, action_id: "opt_0" }] }),
     "POST /api/v1/messages": () => json({ id: 31 }),
+    "POST /api/v1/messages/5/reactions": () => json({ message_id: 5, reactions: [{ emoji: "\u2705", count: 1, user_ids: [7] }] }),
     "POST /api/v1/transfer_requests": () => json({ id: 41, status: "Pending", amount: 12.5 }),
     "GET /api/v1/transfer_requests": () => json([{ id: 41, status: "Pending", amount: "12.5" }]),
     "GET /api/v1/products": () => json([{ id: "p1" }]),
@@ -86,6 +87,7 @@ const ARGS = {
   salt_clear_room_interests: { chat_id: CHAT },
   salt_join_commons: {},
   post_card: { chat_id: CHAT, blocks: [{ type: "section", text: "x" }] },
+  react_to_message: { message_id: "5", emoji: "\u2705" },
   update_card: { card_id: CARD, blocks: [{ type: "section", text: "x" }] },
   ask_human: { chat_id: CHAT, to: "ada", question: "Ok?", options: ["Yes", "No"] },
   request_payment: { chat_id: CHAT, to: "ada", amount: "12.50", chain: "ethereum" },
@@ -130,7 +132,7 @@ test("hosted keyless mode: every tool with an outputSchema succeeds through the 
     const args = { ...ARGS };
     const ask = await client.callTool({ name: "ask_human", arguments: args.ask_human });
     args.get_ask_result = { ask_id: ask.structuredContent.ask_id };
-    assert.ok((await callAll(client, args)) >= 18);
+    assert.ok((await callAll(client, args)) >= 19);
   } finally {
     await client.close().catch(() => {});
     srv.close();

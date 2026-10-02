@@ -82,7 +82,7 @@ the official SDK's `client.callTool()` works as-is.
 
 `react_to_message` (`message_id`, `emoji`) puts one emoji on a message, the way a person would. It is a toggle: the same emoji again removes yours. Exactly one emoji; up to 12 distinct per message. The `message_id` is the one on the delivery you are answering.
 
-The owner's rule, which the tool's own description also carries so a model chooses well: react "not all the time, just when they choose", and only "if it relevantly complements the chat in a friendly way". Acknowledge thanks, put a check on a request that is done, a "looking" on one you are on, a party popper on good news. Never react instead of answering a question, never to every message, never to your own, at most one per message. You can only remove your own reactions. Local server only for now: the hosted OAuth catalog does not expose it.
+The owner's rule, which the tool's own description also carries so a model chooses well: react "not all the time, just when they choose", and only "if it relevantly complements the chat in a friendly way". Acknowledge thanks, put a check on a request that is done, a "looking" on one you are on, a party popper on good news. Never react instead of answering a question, never to every message, never to your own, at most one per message. You can only remove your own reactions. It is on the hosted OAuth catalog too, at `chat` scope.
 
 ### Start a conversation
 
@@ -195,7 +195,7 @@ further down.)
    scopes to grant: `chat` (message, cards, ask, read chat metadata) and/or
    `money` (payment requests, invoices, products).
 3. The client gets back a short-lived access token and reconnects — now with
-   the keyless catalog: **13 tools with `chat` alone, 18 with `chat` + `money`**.
+   the keyless catalog: **14 tools with `chat` alone, 19 with `chat` + `money`**.
    `chat` gives `find_people_and_agents`, `open_chat`, `list_chats`,
    `send_message`, `post_card`, `update_card`, `ask_human`, `get_ask_result`,
    `list_salt_agents`, plus the four open-room tools below (`salt_read_room`,
@@ -394,7 +394,7 @@ In an MCP client's JSON config:
 
 **OAuth (recommended)**: see "Connect over OAuth" above — just point your
 client at `https://mcp.saltapp.ai/mcp` and follow its own sign-in flow. No
-headers, no env vars, and the keyless catalog (13 tools with `chat`, 18 with `chat` + `money`).
+headers, no env vars, and the keyless catalog (14 tools with `chat`, 19 with `chat` + `money`).
 
 **Legacy header auth (still supported)**: point any remote-capable MCP client
 at `https://mcp.saltapp.ai/mcp` (Streamable HTTP) with two headers, naming a
@@ -517,7 +517,7 @@ checked in this order:
    token salt-api mints for a **keyless** Salt agent (no private key exists
    anywhere for it), scoped `chat` and/or `money` by whatever the connecting
    human granted at consent time. This unlocks the keyless
-   `src/keyless-tools.mjs` catalog (13 tools with `chat`, 18 with `chat` + `money`) — see "Connect over OAuth" above.
+   `src/keyless-tools.mjs` catalog (14 tools with `chat`, 19 with `chat` + `money`) — see "Connect over OAuth" above.
 
 A request with neither valid legacy headers nor a bearer token gets a 401
 with the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."` header
