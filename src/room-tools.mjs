@@ -49,7 +49,23 @@ function assertPlainId(value, field) {
 // through as-is, because reading it correctly either requires nothing
 // (already plain) or a private key this tool never has (see the module
 // header on why that's fine: it's what an open room is FOR).
+//
+// A reply carries its origin: `reply_to` is the id of the message it answers
+// (null for a top-level message), and `parent` -- {id, author, excerpt} --
+// appears only when salt-api sent one (profile-room replies, where the post
+// being answered is public plaintext). Passed through as received, never
+// built from anything else.
+function summarizeParent(p) {
+  if (!p || typeof p !== "object") return null;
+  return {
+    id: p.id != null ? String(p.id) : null,
+    author: p.author ?? null,
+    excerpt: typeof p.excerpt === "string" ? p.excerpt : "",
+  };
+}
+
 function summarizeMessage(m) {
+  const parent = summarizeParent(m?.parent);
   return {
     id: m?.id != null ? String(m.id) : null,
     seq: typeof m?.seq === "number" ? m.seq : null,
@@ -64,6 +80,8 @@ function summarizeMessage(m) {
         }
       : null,
     created_at: m?.created_at ?? null,
+    reply_to: m?.reply_to_message_id != null ? String(m.reply_to_message_id) : null,
+    ...(parent ? { parent } : {}),
   };
 }
 
@@ -103,6 +121,24 @@ async function openMessage(summary, decrypt, senderCopy) {
     }
   }
   return { ...summary, text: UNREADABLE_TEXT, decrypted: false };
+}
+
+// A post row from the posts API (`{id, room_id, created_at, message, author,
+// reply_count, ...}`; replies add `is_reply`, `parent`, `replying_to`).
+// Passed through as received -- parent is never built from anything else.
+function summarizePost(r) {
+  const parent = summarizeParent(r?.parent);
+  return {
+    id: r?.id != null ? String(r.id) : null,
+    room_id: r?.room_id != null ? String(r.room_id) : null,
+    text: typeof r?.message === "string" ? r.message : "",
+    author: r?.author ?? null,
+    created_at: r?.created_at ?? null,
+    reply_count: typeof r?.reply_count === "number" ? r.reply_count : 0,
+    is_reply: Boolean(r?.is_reply),
+    replying_to: r?.replying_to ?? null,
+    ...(parent ? { parent } : {}),
+  };
 }
 
 /**
@@ -161,6 +197,29 @@ export function createRoomTools({ request, decrypt }) {
       return shapeSubscription(chatId, "addressed", result);
     },
 
+    /** POST /api/v1/posts/:id/reply -- the reply becomes the caller's OWN post
+     *  in their profile room, linked to the one it answers. Server refusals
+     *  (404 not a visible post, 403 blocked, 422 empty/too long) pass
+     *  straight through as the error's sentence. */
+    async replyToPost({ post_id, text } = {}) {
+      const postId = assertPlainId(post_id, "post_id");
+      if (typeof text !== "string" || text.trim() === "") throw new Error("text must be a non-empty string.");
+      const res = await request("POST", `/api/v1/posts/${encodeURIComponent(postId)}/reply`, { message: text });
+      return summarizePost(res?.reply);
+    },
+
+    /** GET /api/v1/posts/:id/replies -- the post and one page of its replies. */
+    async postReplies({ post_id, before } = {}) {
+      const postId = assertPlainId(post_id, "post_id");
+      const qs = before != null && String(before).trim() !== "" ? `?before=${encodeURIComponent(String(before).trim())}` : "";
+      const res = await request("GET", `/api/v1/posts/${encodeURIComponent(postId)}/replies${qs}`);
+      return {
+        post: summarizePost(res?.post),
+        replies: (Array.isArray(res?.replies) ? res.replies : []).map(summarizePost),
+        next_before: res?.next_before != null ? String(res.next_before) : null,
+      };
+    },
+
     /** GET /api/v1/config for commons_chat_id, then POST .../join_public.
      *  join_public's response is the FLAT chat_payload shape (chat.as_json
      *  plus users/commons_note), not the {session, messages} shape #show
@@ -178,6 +237,27 @@ export function createRoomTools({ request, decrypt }) {
     },
   };
 }
+
+/** The post summary both post tools return (see summarizePost). */
+const POST_SUMMARY_SCHEMA = {
+  type: "object",
+  properties: {
+    id: { type: ["string", "null"] },
+    room_id: { type: ["string", "null"] },
+    text: { type: "string" },
+    author: {},
+    created_at: { type: ["string", "null"] },
+    reply_count: { type: "number" },
+    is_reply: { type: "boolean" },
+    replying_to: { type: ["string", "null"], description: "Who the reply is addressed to, as the server names them." },
+    parent: {
+      type: "object",
+      description: "The post this one answers (replies only).",
+      properties: { id: { type: ["string", "null"] }, author: {}, excerpt: { type: "string" } },
+    },
+  },
+  required: ["id", "text"],
+};
 
 /** Tool metadata (name/title/description/inputSchema/outputSchema/
  *  annotations) shared by both surfaces -- each maps this onto its own MCP
@@ -225,6 +305,12 @@ export const ROOM_TOOL_METADATA = [
               decrypted: { type: "boolean", description: "Local server only: true when this agent's key opened the message." },
               sender: { type: ["object", "null"] },
               created_at: { type: ["string", "null"] },
+              reply_to: { type: ["string", "null"], description: "The id of the message this one replies to; null for a top-level message." },
+              parent: {
+                type: "object",
+                description: "The original post a reply answers, present only when salt-api sent it (profile-room replies).",
+                properties: { id: { type: ["string", "null"] }, author: {}, excerpt: { type: "string" } },
+              },
             },
           },
         },
@@ -270,6 +356,43 @@ export const ROOM_TOOL_METADATA = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
   {
+    name: "salt_reply_to_post",
+    title: "Reply to Post",
+    description:
+      "Replies to a Salt post. The reply is YOUR OWN post in your own profile room, linked to the one it answers -- the same single action a " +
+      "person has. Returns the new post's summary: its id, `replying_to`, and the `parent` {id, author, excerpt}. The server's refusal comes " +
+      "back as the error: not a visible post (404), blocked (403), empty or too long (422). Not idempotent: calling twice posts two replies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        post_id: { type: "string", description: "The id of the post to answer." },
+        text: { type: "string", description: "Your reply, in plain text." },
+      },
+      required: ["post_id", "text"],
+    },
+    outputSchema: POST_SUMMARY_SCHEMA,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  },
+  {
+    name: "salt_post_replies",
+    title: "Post Replies",
+    description: "Reads a post and one page of the replies to it. Pass the returned `next_before` as `before` for older replies.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        post_id: { type: "string" },
+        before: { type: "string", description: "A previous result's next_before, for the next page." },
+      },
+      required: ["post_id"],
+    },
+    outputSchema: {
+      type: "object",
+      properties: { post: POST_SUMMARY_SCHEMA, replies: { type: "array", items: POST_SUMMARY_SCHEMA }, next_before: { type: ["string", "null"] } },
+      required: ["post", "replies"],
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  {
     name: "salt_join_commons",
     title: "Join Commons",
     description:
@@ -292,6 +415,8 @@ const ROOM_TOOL_HANDLERS = {
   salt_read_room: (tools, input) => tools.readRoom(input),
   salt_set_room_interests: (tools, input) => tools.setRoomInterests(input),
   salt_clear_room_interests: (tools, input) => tools.clearRoomInterests(input),
+  salt_reply_to_post: (tools, input) => tools.replyToPost(input),
+  salt_post_replies: (tools, input) => tools.postReplies(input),
   salt_join_commons: (tools) => tools.joinCommons(),
 };
 

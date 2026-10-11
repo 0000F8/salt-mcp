@@ -279,7 +279,7 @@ test("POST /mcp with a valid bearer token lists the keyless toolset and forwards
     await client.connect(transport);
 
     const { tools } = await client.listTools();
-    assert.equal(tools.length, 19, "the full keyless catalog (15 K5 tools + 4 open-room tools)");
+    assert.equal(tools.length, 21, "the full keyless catalog (15 K5 tools + 6 open-room tools)");
     const postCardTool = tools.find((t) => t.name === "post_card");
     assert.equal(postCardTool._meta.ui.resourceUri, "ui://salt/card");
 
@@ -308,7 +308,7 @@ test("tools/list for a chat-only bearer hides the money tools, and calling one a
     }));
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name);
-    assert.equal(names.length, 14, "chat alone lists 14 tools (10 keyless + 4 open-room); the README states this count");
+    assert.equal(names.length, 16, "chat alone lists 16 tools (10 keyless + 6 open-room); the README states this count");
     for (const hidden of ["request_payment", "send_invoice", "get_payment_status", "list_products", "create_product"]) {
       assert.ok(!names.includes(hidden), `${hidden} must not be listed without the money scope`);
     }
