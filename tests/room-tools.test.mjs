@@ -58,7 +58,7 @@ test("readRoom: the public (non-member) read shape passes through session fields
   assert.equal(result.member, false);
   assert.equal(result.member_count, 12);
   assert.deepEqual(result.messages, [
-    { id: "m1", seq: 1, encrypted: false, text: "hello room", sender: { id: "u1", username: "ada", display_name: "Ada", account_type: "User" }, created_at: "2026-09-22T00:00:00Z" },
+    { id: "m1", seq: 1, encrypted: false, text: "hello room", sender: { id: "u1", username: "ada", display_name: "Ada", account_type: "User" }, created_at: "2026-09-22T00:00:00Z", reply_to: null },
   ]);
 });
 
@@ -166,24 +166,28 @@ test("joinCommons: refuses plainly, without calling join_public, when the deploy
 
 // --- runRoomTool / metadata / ROOM_TOOL_NAMES ------------------------------
 
-test("runRoomTool dispatches each of the four names to the matching handler, and refuses anything else", async () => {
+test("runRoomTool dispatches each of the six names to the matching handler, and refuses anything else", async () => {
   const { request } = fakeRequest({
     [`GET /api/v1/chats/${CHAT_ID}`]: { session: { id: CHAT_ID }, messages: [] },
     [`PUT /api/v1/chats/${CHAT_ID}/subscription`]: { chat_id: CHAT_ID, mode: "all", keywords: [] },
     [`DELETE /api/v1/chats/${CHAT_ID}/subscription`]: { chat_id: CHAT_ID, mode: "addressed", keywords: [] },
     "GET /api/v1/config": { commons_chat_id: COMMONS_ID },
     [`POST /api/v1/chats/${COMMONS_ID}/join_public`]: { id: COMMONS_ID, name: "The Commons" },
+    "POST /api/v1/posts/41/reply": { reply: { id: 42, message: "hi", is_reply: true } },
+    "GET /api/v1/posts/41/replies": { post: { id: 41, message: "x" }, replies: [], next_before: null },
   });
 
   assert.equal((await runRoomTool("salt_read_room", { chat_id: CHAT_ID }, { request })).chat_id, CHAT_ID);
   assert.equal((await runRoomTool("salt_set_room_interests", { chat_id: CHAT_ID, mode: "all" }, { request })).mode, "all");
   assert.equal((await runRoomTool("salt_clear_room_interests", { chat_id: CHAT_ID }, { request })).mode, "addressed");
   assert.equal((await runRoomTool("salt_join_commons", {}, { request })).chat_id, COMMONS_ID);
+  assert.equal((await runRoomTool("salt_reply_to_post", { post_id: "41", text: "hi" }, { request })).id, "42");
+  assert.equal((await runRoomTool("salt_post_replies", { post_id: "41" }, { request })).replies.length, 0);
   await assert.rejects(() => runRoomTool("not_a_room_tool", {}, { request }), /not a room tool/);
 });
 
-test("ROOM_TOOL_NAMES names exactly the four open-room tools, matching ROOM_TOOL_METADATA", () => {
-  assert.deepEqual([...ROOM_TOOL_NAMES].sort(), ["salt_clear_room_interests", "salt_join_commons", "salt_read_room", "salt_set_room_interests"]);
+test("ROOM_TOOL_NAMES names exactly the six open-room tools, matching ROOM_TOOL_METADATA", () => {
+  assert.deepEqual([...ROOM_TOOL_NAMES].sort(), ["salt_clear_room_interests", "salt_join_commons", "salt_post_replies", "salt_read_room", "salt_reply_to_post", "salt_set_room_interests"]);
   assert.deepEqual(ROOM_TOOL_METADATA.map((m) => m.name).sort(), [...ROOM_TOOL_NAMES].sort());
 });
 
@@ -198,10 +202,13 @@ test("every room tool's metadata carries a title, all four annotation hints, and
   }
 });
 
-test("salt_read_room is read-only; the other three are not (they write a subscription or join a room)", () => {
+test("salt_read_room and salt_post_replies are read-only; the other four are not (they write a subscription, a reply, or join a room)", () => {
   const byName = Object.fromEntries(ROOM_TOOL_METADATA.map((m) => [m.name, m]));
   assert.equal(byName.salt_read_room.annotations.readOnlyHint, true);
-  for (const name of ["salt_set_room_interests", "salt_clear_room_interests", "salt_join_commons"]) {
+  assert.equal(byName.salt_post_replies.annotations.readOnlyHint, true);
+  assert.equal(byName.salt_reply_to_post.annotations.idempotentHint, false);
+  assert.equal(byName.salt_reply_to_post.annotations.destructiveHint, false);
+  for (const name of ["salt_set_room_interests", "salt_clear_room_interests", "salt_reply_to_post", "salt_join_commons"]) {
     assert.equal(byName[name].annotations.readOnlyHint, false, name);
   }
 });
@@ -249,4 +256,61 @@ test("createApiKeyRequest: a 204/empty response resolves to undefined rather tha
   const fetchImpl = async () => new Response("", { status: 200 });
   const request = createApiKeyRequest({ host: "https://fake-salt.test", apiKey: "key-123", fetchImpl });
   assert.equal(await request("DELETE", "/api/v1/chats/abc/subscription"), undefined);
+});
+
+test("readRoom: a reply carries reply_to and, when the server sends one, the parent post; no parent is invented", async () => {
+  const { request } = fakeRequest({
+    [`GET /api/v1/chats/${CHAT_ID}`]: {
+      session: {},
+      messages: [
+        { id: "m3", seq: 3, encrypted: false, message: "agreed", reply_to_message_id: 41, parent: { id: 41, author: "ada", excerpt: "the original post" } },
+        { id: "m4", seq: 4, encrypted: false, message: "no parent sent", reply_to_message_id: "99" },
+      ],
+    },
+  });
+  const result = await createRoomTools({ request }).readRoom({ chat_id: CHAT_ID });
+  assert.equal(result.messages[0].reply_to, "41");
+  assert.deepEqual(result.messages[0].parent, { id: "41", author: "ada", excerpt: "the original post" });
+  assert.equal(result.messages[1].reply_to, "99");
+  assert.equal("parent" in result.messages[1], false);
+});
+
+test("salt_reply_to_post posts {message} to the reply path and returns id, replying_to and the parent excerpt", async () => {
+  const { request, calls } = fakeRequest({
+    "POST /api/v1/posts/41/reply": {
+      reply: { id: 42, room_id: "r1", message: "agreed", author: "bot", reply_count: 0, is_reply: true, parent: { id: 41, author: "ada", excerpt: "the original" }, replying_to: "ada" },
+    },
+  });
+  const out = await createRoomTools({ request }).replyToPost({ post_id: "41", text: "agreed" });
+  assert.deepEqual(calls, [{ method: "POST", path: "/api/v1/posts/41/reply", body: { message: "agreed" } }]);
+  assert.equal(out.id, "42");
+  assert.equal(out.is_reply, true);
+  assert.equal(out.replying_to, "ada");
+  assert.deepEqual(out.parent, { id: "41", author: "ada", excerpt: "the original" });
+});
+
+test("salt_reply_to_post refuses empty text locally and passes the server's refusal sentence through", async () => {
+  const { request } = fakeRequest({
+    "POST /api/v1/posts/9/reply": () => {
+      throw new Error("Salt API POST /api/v1/posts/9/reply -> 404: That post is not available.");
+    },
+  });
+  const tools = createRoomTools({ request });
+  await assert.rejects(() => tools.replyToPost({ post_id: "9", text: "  " }), /text must be a non-empty string/);
+  await assert.rejects(() => tools.replyToPost({ post_id: "9", text: "hi" }), /404: That post is not available\./);
+});
+
+test("salt_post_replies reads the replies path (with before) and summarises post, replies and next_before", async () => {
+  const { request, calls } = fakeRequest({
+    "GET /api/v1/posts/41/replies": {
+      post: { id: 41, message: "orig", reply_count: 1 },
+      replies: [{ id: 42, message: "agreed", is_reply: true, parent: { id: 41, author: "ada", excerpt: "orig" }, replying_to: "ada" }],
+      next_before: "c9",
+    },
+  });
+  const out = await createRoomTools({ request }).postReplies({ post_id: "41", before: "c1" });
+  assert.equal(calls[0].path, "/api/v1/posts/41/replies?before=c1");
+  assert.equal(out.post.id, "41");
+  assert.equal(out.replies[0].parent.excerpt, "orig");
+  assert.equal(out.next_before, "c9");
 });

@@ -43,6 +43,8 @@ function fakeSaltFetch() {
     [`DELETE /api/v1/chats/${CHAT}/subscription`]: () => json({}),
     "GET /api/v1/config": () => json({ commons_chat_id: CHAT }),
     [`POST /api/v1/chats/${CHAT}/join_public`]: () => json({ id: CHAT, name: "The Commons", commons_note: "Hello" }),
+    "POST /api/v1/posts/41/reply": () => json({ reply: { id: 42, room_id: "r1", message: "agreed", reply_count: 0, is_reply: true, parent: { id: 41, author: "ada", excerpt: "orig" }, replying_to: "ada" } }, 201),
+    "GET /api/v1/posts/41/replies": () => json({ post: { id: 41, message: "orig" }, replies: [], next_before: null }),
     "POST /api/v1/cards": () => json({ id: 12, resource_id: CARD }),
     [`PATCH /api/v1/cards/${CARD}`]: () => json({}),
     [`GET /api/v1/cards/${CARD}`]: () => json({ interactions: [{ id: 3, action_id: "opt_0" }] }),
@@ -85,6 +87,8 @@ const ARGS = {
   salt_read_room: { chat_id: CHAT },
   salt_set_room_interests: { chat_id: CHAT, mode: "all" },
   salt_clear_room_interests: { chat_id: CHAT },
+  salt_reply_to_post: { post_id: "41", text: "agreed" },
+  salt_post_replies: { post_id: "41" },
   salt_join_commons: {},
   post_card: { chat_id: CHAT, blocks: [{ type: "section", text: "x" }] },
   react_to_message: { message_id: "5", emoji: "\u2705" },
@@ -112,7 +116,7 @@ test("local mode: every tool with an outputSchema succeeds through the official 
     const local = { ...ARGS };
     const { tools } = await client.listTools();
     const names = new Set(tools.filter((t) => t.outputSchema).map((t) => t.name));
-    for (const n of ["open_chat", "ask_human", "get_ask_result", "salt_read_room", "salt_set_room_interests", "salt_clear_room_interests", "salt_join_commons"]) assert.ok(names.has(n), n);
+    for (const n of ["open_chat", "ask_human", "get_ask_result", "salt_read_room", "salt_set_room_interests", "salt_clear_room_interests", "salt_reply_to_post", "salt_post_replies", "salt_join_commons"]) assert.ok(names.has(n), n);
     // get_ask_result needs an ask_id from a real ask_human.
     const ask = await client.callTool({ name: "ask_human", arguments: local.ask_human });
     local.get_ask_result = { ask_id: ask.structuredContent.ask_id };

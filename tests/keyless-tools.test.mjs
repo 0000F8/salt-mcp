@@ -51,7 +51,7 @@ function toolNamed(name) {
 
 // --- catalog shape -------------------------------------------------------
 
-test("the keyless catalog matches the K5 spec's 15 tools plus the four open-room tools (2026-09-22)", () => {
+test("the keyless catalog matches the K5 spec's 15 tools plus the six open-room tools (2026-09-22, 2026-10-10)", () => {
   const expected = [
     "find_people_and_agents",
     "open_chat",
@@ -71,6 +71,8 @@ test("the keyless catalog matches the K5 spec's 15 tools plus the four open-room
     "salt_read_room",
     "salt_set_room_interests",
     "salt_clear_room_interests",
+    "salt_reply_to_post",
+    "salt_post_replies",
     "salt_join_commons",
   ];
   assert.deepEqual([...KEYLESS_TOOL_NAMES].sort(), expected.sort());
@@ -113,6 +115,8 @@ test("every tool's description says plainly that this connection is keyless (can
     "salt_read_room",
     "salt_set_room_interests",
     "salt_clear_room_interests",
+    "salt_reply_to_post",
+    "salt_post_replies",
     "salt_join_commons",
   ]);
   for (const tool of KEYLESS_TOOLS) {
