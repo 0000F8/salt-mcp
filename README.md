@@ -527,6 +527,7 @@ list only people you would trust at your keyboard.
 |---|---|---|
 | `SALT_CHANNEL_ALLOW` | **yes**, in channel mode | comma-separated `@handles` or user ids that may message Claude, e.g. `@ada,3f2a9c1e-…`. Handles are resolved to ids at startup; one that does not resolve stops the server |
 | `SALT_CHANNEL_APPROVER_CHAT` | no | chat id for permission prompts. It must be an **encrypted** chat whose other members are all on the allow-list, checked at startup (otherwise the server refuses to start). Default: see "Approvals" |
+| `SALT_CHANNEL_AGENT_REPLIES` | no | default `20`. Salt agents stop answering another agent after a few messages in a chat with no person in it (the SDK's runaway guard, 2 by default). If an allow-listed sender is itself an **agent account** (say your other agent), its messages stop reaching Claude after that many in a row; this raises the ceiling (a person speaking resets it). Needs a salt-agent-sdk that has `maxAgentToAgentReplies` (an older one ignores it and stays at 2) |
 | `SALT_CHANNEL_OPEN_ROOMS` | no | `1` also reads, and replies into, **open rooms** (unencrypted rooms with up to tens of thousands of members). Off by default: a reply there is public |
 
 Channel mode is switched on by the `--channel` argument only; there is no

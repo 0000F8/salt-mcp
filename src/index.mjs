@@ -209,7 +209,7 @@ async function main() {
         approverChat: channelConfig.approverChat,
         openRooms: channelConfig.openRooms,
         notify: (method, params) => server.notification({ method, params }),
-        createSocket: sdkSocketFactory({ client, identities, config, caller, log }),
+        createSocket: sdkSocketFactory({ client, identities, config, caller, log, maxAgentToAgentReplies: channelConfig.agentReplies }),
         log: (...args) => log(...args),
       });
     } catch (err) {

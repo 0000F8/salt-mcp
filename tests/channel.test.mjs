@@ -29,6 +29,8 @@ import {
   verifyApproverChat,
   acquireChannelLock,
   buildChannelEvent,
+  sdkSocketFactory,
+  DEFAULT_AGENT_REPLIES,
   createChannelBridge,
 } from "../src/channel.mjs";
 
@@ -268,6 +270,47 @@ test("allow-list parsing: @handles, bare handles and plain ids, case-insensitive
   assert.equal(cfg.openRooms, true);
   assert.equal(loadChannelConfig({ SALT_CHANNEL_ALLOW: "@ada" }, ["--channel"]).openRooms, false);
   assert.throws(() => loadChannelConfig({ SALT_CHANNEL_ALLOW: "@ada", SALT_CHANNEL_APPROVER_CHAT: "not an id" }, ["--channel"]), ChannelConfigError);
+});
+
+test("SALT_CHANNEL_AGENT_REPLIES defaults to 20, takes a positive whole number, and rejects anything else", () => {
+  const cfg = (extra = {}) => loadChannelConfig({ SALT_CHANNEL_ALLOW: "@ada", ...extra }, ["--channel"]);
+  assert.equal(DEFAULT_AGENT_REPLIES, 20);
+  assert.equal(cfg().agentReplies, 20);
+  assert.equal(cfg({ SALT_CHANNEL_AGENT_REPLIES: "50" }).agentReplies, 50);
+  for (const bad of ["0", "-3", "2.5", "many"]) {
+    assert.throws(() => cfg({ SALT_CHANNEL_AGENT_REPLIES: bad }), (err) => err instanceof ChannelConfigError && /SALT_CHANNEL_AGENT_REPLIES/.test(err.message));
+  }
+});
+
+test("the live socket is opened with this agent's identity, the stderr logger and the agent-reply cap", () => {
+  const opened = [];
+  const logs = [];
+  const handlers = { onMessage() {}, onCardInteraction() {} };
+  const make = (extra = {}) =>
+    sdkSocketFactory({
+      client: { marker: "client" },
+      identities: { marker: "identities" },
+      config: { host: "https://x.invalid", pgpPassphrase: "pw" },
+      caller: BOT,
+      log: (m) => logs.push(m),
+      socketClient: (options) => {
+        opened.push(options);
+        return { start() {}, async stop() {} };
+      },
+      ...extra,
+    })(handlers);
+  make({ maxAgentToAgentReplies: 35 });
+  make();
+  assert.equal(opened[0].maxAgentToAgentReplies, 35);
+  assert.equal(opened[1].maxAgentToAgentReplies, 20);
+  assert.equal(opened[0].apiKey, "bot-key");
+  assert.equal(opened[0].agentId, BOT_ID);
+  assert.equal(opened[0].host, "https://x.invalid");
+  assert.equal(opened[0].onMessage, handlers.onMessage);
+  assert.equal(opened[0].onCardInteraction, handlers.onCardInteraction);
+  opened[0].logger.info("a");
+  opened[0].logger.error("b");
+  assert.deepEqual(logs, ["a", "b"]); // never console.log: stdout is the protocol
 });
 
 test("handles resolve to ids through the API", async () => {

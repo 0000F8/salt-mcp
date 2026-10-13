@@ -84,6 +84,7 @@ export const REPLY_TOOL_NAMES = new Set([REPLY_TOOL.name]);
 const MAX_REPLY_CHARS = 20_000;
 const PLAIN_ID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)$/;
 const MAX_PENDING_PERMISSIONS = 50;
+export const DEFAULT_AGENT_REPLIES = 20;
 
 export class ChannelConfigError extends Error {}
 
@@ -111,7 +112,15 @@ export function loadChannelConfig(env = process.env, argv = process.argv.slice(2
   if (approverChat && !PLAIN_ID_RE.test(approverChat)) {
     throw new ChannelConfigError(`SALT_CHANNEL_APPROVER_CHAT must be a plain Salt chat id (a uuid or an integer), got "${approverChat.slice(0, 60)}".`);
   }
-  return { enabled: true, allow: entries, approverChat: approverChat || undefined, openRooms: truthy(env.SALT_CHANNEL_OPEN_ROOMS) };
+
+  // The SDK stops delivering an agent sender's messages after this many in a person-free chat (default 2).
+  // An allow-listed AGENT account needs more room than that, but it stays a ceiling: it is the runaway guard.
+  const rawReplies = String(env.SALT_CHANNEL_AGENT_REPLIES ?? "").trim();
+  const agentReplies = rawReplies === "" ? DEFAULT_AGENT_REPLIES : Number(rawReplies);
+  if (!Number.isInteger(agentReplies) || agentReplies < 1) {
+    throw new ChannelConfigError(`SALT_CHANNEL_AGENT_REPLIES must be a positive whole number, got "${rawReplies.slice(0, 40)}".`);
+  }
+  return { enabled: true, allow: entries, approverChat: approverChat || undefined, openRooms: truthy(env.SALT_CHANNEL_OPEN_ROOMS), agentReplies };
 }
 
 /** "@ada, 1234,ADA" -> {ids: Set of plain ids, handles: Set of lowercase handles}. A bare word is a handle; a uuid or integer is an id. */
@@ -498,16 +507,17 @@ export function createChannelBridge({
 }
 
 /** The production wiring of createSocket: the SDK's live socket for this one agent identity. */
-export function sdkSocketFactory({ client, identities, config, caller, log }) {
+export function sdkSocketFactory({ client, identities, config, caller, log, maxAgentToAgentReplies = DEFAULT_AGENT_REPLIES, socketClient = createSocketClient }) {
   const logger = { info: (m) => log(m), error: (m) => log(m) };
   return (handlers) =>
-    createSocketClient({
+    socketClient({
       client,
       identities,
       pgpPassphrase: config.pgpPassphrase,
       host: config.host,
       apiKey: caller.apiKey,
       agentId: caller.saltAppId,
+      maxAgentToAgentReplies,
       logger,
       ...handlers,
     });
