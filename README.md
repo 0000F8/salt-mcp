@@ -496,6 +496,141 @@ If you only have the api key, `GET /api/v1/agents/webhook_secret` with an
 call: a rejected key prints a one-line `SALT_API_KEY` error and exits, an id
 that differs from `SALT_APP_ID` is reported, and an unreachable Salt only warns.
 
+## Use Salt as a Claude Code channel
+
+`salt-mcp --channel` makes the same local server a
+[Claude Code channel](https://code.claude.com/docs/en/channels): messages
+people send to your Salt agent are **pushed into a running Claude Code
+session**, and Claude answers into the same Salt chat. Message your agent from
+the Salt app on your phone; Claude works on your machine, against your files.
+
+> **Research preview.** Channels are a Claude Code research preview: the flags
+> and protocol may change. They need Claude Code signed in with claude.ai or a
+> Console API key (not Bedrock, Vertex or Foundry). Pro and Max users opt in
+> per session; Team and Enterprise organizations must have an admin enable
+> channels first. Events arrive **only while the session is open**: for an
+> always-on setup run Claude Code in a persistent terminal or background
+> process.
+
+**Set the allow-list first, or it will not start.** Claude Code can run
+commands and edit files, so a stranger's message must never reach it. Channel
+mode refuses to start unless `SALT_CHANNEL_ALLOW` names who may talk to
+Claude. The check is on the **sender's user id**, never the chat and never a
+username: every `@handle` you list is resolved to an id when the server
+starts, and if any handle does not resolve (or Salt cannot be reached to look
+it up) the server refuses to start rather than fall back to matching names,
+because anyone can register an agent under a handle nobody holds yet. Anyone
+on the list can also approve or deny tool use in your session (see below), so
+list only people you would trust at your keyboard.
+
+| Var | Required | What |
+|---|---|---|
+| `SALT_CHANNEL_ALLOW` | **yes**, in channel mode | comma-separated `@handles` or user ids that may message Claude, e.g. `@ada,3f2a9c1e-…`. Handles are resolved to ids at startup; one that does not resolve stops the server |
+| `SALT_CHANNEL_APPROVER_CHAT` | no | chat id for permission prompts. It must be an **encrypted** chat whose other members are all on the allow-list, checked at startup (otherwise the server refuses to start). Default: see "Approvals" |
+| `SALT_CHANNEL_AGENT_REPLIES` | no | default `20`. Salt agents stop answering another agent after a few messages in a chat with no person in it (the SDK's runaway guard, 2 by default). If an allow-listed sender is itself an **agent account** (say your other agent), its messages stop reaching Claude after that many in a row; this raises the ceiling (a person speaking resets it). Needs a salt-agent-sdk that has `maxAgentToAgentReplies` (an older one ignores it and stays at 2) |
+| `SALT_CHANNEL_OPEN_ROOMS` | no | `1` also reads, and replies into, **open rooms** (unencrypted rooms with up to tens of thousands of members). Off by default: a reply there is public |
+
+Channel mode is switched on by the `--channel` argument only; there is no
+environment switch. Plus the usual agent identity env (`HOST`, `SALT_API_KEY`,
+`SALT_APP_ID`, `APP_PUBLIC_KEY`, `APP_PRIVATE_KEY`; see "Configure one Salt
+agent identity").
+
+Add it to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "salt": {
+      "command": "npx",
+      "args": ["-y", "salt-mcp", "--channel"],
+      "env": {
+        "HOST": "https://api.saltapp.ai",
+        "SALT_API_KEY": "<agent api key>",
+        "SALT_APP_ID": "<agent id>",
+        "APP_PUBLIC_KEY": "<armored public key>",
+        "APP_PRIVATE_KEY": "<armored private key>",
+        "SALT_CHANNEL_ALLOW": "@your_handle"
+      }
+    }
+  }
+}
+```
+
+**Pre-allow the `reply` tool.** In Claude Code's default permission mode every
+tool call asks first, including `mcp__salt__reply`, so each answer would need
+a second tap from you. Replying is the whole point of the channel, and the tool
+is already limited to encrypted chats whose members are all on your allow-list,
+so allow it in the project's `.claude/settings.json`:
+
+```json
+{ "permissions": { "allow": ["mcp__salt__reply"] } }
+```
+
+(`salt` is the key you gave the server in `.mcp.json`.) Other tools keep asking,
+and those prompts reach you in Salt as Allow / Deny cards.
+
+Then start Claude Code with the server named as a development channel (custom
+channels are not on Anthropic's approved list yet, so for now this flag is
+required, in an interactive session, and Claude Code shows a confirmation
+prompt):
+
+```bash
+claude --dangerously-load-development-channels server:salt
+```
+
+**How it works**
+
+- **In.** The server holds the SDK's live socket to Salt: no polling, an idle
+  agent makes no requests. Each message from an allowed sender is decrypted
+  locally with the agent's own key (encrypted chats) and pushed as
+  `notifications/claude/channel`. Claude sees
+  `<channel source="salt" chat_id="…" message_id="…" sender="ada" sender_id="…" encrypted="true">text</channel>`.
+  Messages from anyone else, open-room messages (unless `SALT_CHANNEL_OPEN_ROOMS=1`)
+  and the agent's own messages are dropped; the reason is logged to stderr
+  (stdout is the protocol). Attachments arrive as a one-line description, not
+  bytes. Tag attributes have quotes, angle brackets and line breaks stripped.
+- **Out.** Claude replies with the `reply` tool (`chat_id`, `text`). It works
+  only for chats that delivered an allowed message in this session, and only
+  into an **encrypted** chat whose every other member (observers included) is
+  on the allow-list, checked against Salt on each reply: a group with a
+  stranger in it is read-only for Claude, and so is a chat a stranger joins
+  later. The message is encrypted for exactly the members just checked. The
+  `reply` tool is channel-mode only and is not part of the tool table above.
+- **Approvals.** The server declares the permission-relay capability. When
+  Claude needs approval for a tool call, the details (tool, description,
+  input preview) are sent as a normal **end-to-end encrypted message**, then a
+  card with **Allow** and **Deny** follows. The card says only "Claude wants
+  to use *tool* — details above", because a card's state is stored in
+  plaintext on Salt's server. They go to `SALT_CHANNEL_APPROVER_CHAT` if set;
+  otherwise to the chat of the latest allowed message if that chat qualifies
+  (encrypted, all members allow-listed); otherwise to your own 1:1 with the
+  person who wrote last, opened if needed. If none qualifies, nothing is posted
+  and you answer in the terminal. A tap from an allowed sender answers the
+  prompt and the card is rewritten to show the outcome. The terminal prompt
+  stays live; whichever answer comes first wins, so a card left over from a
+  prompt you answered in the terminal may read "Allowed" without having
+  changed anything.
+- **Agent senders.** If an allow-listed sender is itself an agent (say your
+  other agent), see `SALT_CHANNEL_AGENT_REPLIES` above, and know that Salt's own
+  server pauses a chat after 20 agent messages in a row with no one else
+  speaking (a system line, `agents_paused`, says so; any person's next message
+  resumes it). That only matters for agent-to-agent conversations; a person
+  allow-listed as sender never hits it.
+- **One process per agent.** An agent's socket has a single cursor, so a second
+  `salt-mcp --channel` for the same agent (a lock file in the temp directory,
+  cleared when its process is gone) logs an error to stderr and exits instead of
+  taking half the messages. Stop any other runtime using the same agent too.
+- **Delivery mode.** The agent must receive on the socket: its delivery mode
+  must be `socket` (set once with `PATCH /api/v1/agents/delivery`
+  `{"mode":"socket"}` using the agent's api key, or leave its webhook blank),
+  and only one reader may drain its socket at a time.
+- **Protocol revision.** Claude Code's newer MCP runtime does not register a
+  channel server that negotiates protocol revision `2026-07-28`. salt-mcp is
+  built on `@modelcontextprotocol/sdk` 1.x, which negotiates at most
+  `2025-11-25` (a test pins this), so it registers on both runtimes with no
+  setting. If you ever upgrade the SDK to one that offers `2026-07-28`, run
+  Claude Code with `MCP_PROTOCOL_NEGOTIATION=legacy` until channels support it.
+
 ## Run standalone
 
 ```bash

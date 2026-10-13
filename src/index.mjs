@@ -28,6 +28,19 @@ import { LOCAL_TOOL_NAMES, toLocalMcpTools, createLocalRest, runLocalTool } from
 import { createDecryptor } from "./local-decrypt.mjs";
 import { checkCredentials } from "./startup-check.mjs";
 import { toolResult } from "./tool-result.mjs";
+import {
+  CHANNEL_CAPABILITY,
+  CHANNEL_PERMISSION_CAPABILITY,
+  CHANNEL_INSTRUCTIONS,
+  REPLY_TOOL_NAMES,
+  ChannelConfigError,
+  loadChannelConfig,
+  resolveAllowList,
+  verifyApproverChat,
+  acquireChannelLock,
+  createChannelBridge,
+  sdkSocketFactory,
+} from "./channel.mjs";
 
 const {
   loadSaltAgentConfig,
@@ -93,18 +106,20 @@ function withChatIdForPostCard(tool) {
 /**
  * The local server's whole tool surface as two functions, so tests can drive
  * it without stdio. `decrypt` opens messages for salt_read_room (omit it and
- * ciphertext comes back untouched, as on the hosted server).
+ * ciphertext comes back untouched, as on the hosted server). `channel` (a
+ * bridge from channel.mjs, channel mode only) adds its `reply` tool.
  */
-export function createLocalHandlers({ actions, caller, host, decrypt, fetchImpl }) {
+export function createLocalHandlers({ actions, caller, host, decrypt, fetchImpl, channel }) {
   const roomRequest = createApiKeyRequest({ host, apiKey: caller.apiKey, fetchImpl });
   const rest = createLocalRest({ host, fetchImpl });
   return {
-    toolCount: actions.definitions.length + LOCAL_TOOL_NAMES.size + ROOM_TOOL_NAMES.size,
+    toolCount: actions.definitions.length + LOCAL_TOOL_NAMES.size + ROOM_TOOL_NAMES.size + (channel ? channel.tools.length : 0),
     listTools() {
       const sdkTools = toMcpTools(actions.definitions).map((t) => (t.name === "post_card" ? withChatIdForPostCard(t) : t));
-      return [...sdkTools, ...toLocalMcpTools(), ...toRoomMcpTools({ decrypts: Boolean(decrypt) })];
+      return [...sdkTools, ...toLocalMcpTools(), ...toRoomMcpTools({ decrypts: Boolean(decrypt) }), ...(channel ? channel.tools : [])];
     },
     async callTool(name, args = {}, extra = {}) {
+      if (channel && REPLY_TOOL_NAMES.has(name)) return channel.reply(args);
       if (ROOM_TOOL_NAMES.has(name)) return runRoomTool(name, args, { request: roomRequest, decrypt });
       if (LOCAL_TOOL_NAMES.has(name)) return runLocalTool(name, args, { rest, apiKey: caller.apiKey, ...extra });
       // No chat context in an MCP session -- depth 0, mainChatId null. Actions
@@ -128,6 +143,16 @@ export function createLocalHandlers({ actions, caller, host, decrypt, fetchImpl 
 // speaks MCP over stdio) so it only runs when this file is the process
 // entry point -- never on import, e.g. from a test.
 async function main() {
+  // Checked before anything else: a channel with no allow-list must not start.
+  let channelConfig;
+  try {
+    channelConfig = loadChannelConfig();
+  } catch (err) {
+    if (!(err instanceof ChannelConfigError)) throw err;
+    log(`ERROR: ${err.message}`);
+    process.exit(1);
+  }
+
   const config = loadSaltAgentConfig();
   const missing = validateSaltAgentConfig(config);
   if (missing.length) {
@@ -165,21 +190,72 @@ async function main() {
   // Local mode holds this agent's private key, so salt_read_room can open
   // the encrypted messages it was a recipient of.
   const decrypt = caller.privateKey ? createDecryptor({ privateKey: caller.privateKey, passphrase: config.pgpPassphrase }) : undefined;
-  const handlers = createLocalHandlers({ actions, caller, host: config.host, decrypt });
 
-  const server = buildLocalServer(handlers);
+  let channel;
+  let server;
+  if (channelConfig.enabled) {
+    try {
+      // One reader per agent: its socket has a single cursor.
+      const release = acquireChannelLock(config.saltAppId);
+      process.once("exit", release);
+      const allowedIds = await resolveAllowList({ client, apiKey: caller.apiKey, allow: channelConfig.allow });
+      if (channelConfig.approverChat) {
+        await verifyApproverChat({ client, apiKey: caller.apiKey, selfId: caller.saltAppId, chatId: channelConfig.approverChat, allowedIds });
+      }
+      channel = createChannelBridge({
+        client,
+        caller,
+        allowedIds,
+        approverChat: channelConfig.approverChat,
+        openRooms: channelConfig.openRooms,
+        notify: (method, params) => server.notification({ method, params }),
+        createSocket: sdkSocketFactory({ client, identities, config, caller, log, maxAgentToAgentReplies: channelConfig.agentReplies }),
+        log: (...args) => log(...args),
+      });
+    } catch (err) {
+      if (!(err instanceof ChannelConfigError)) throw err;
+      log(`ERROR: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  const handlers = createLocalHandlers({ actions, caller, host: config.host, decrypt, channel });
+
+  server = buildLocalServer(handlers, { channel });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  log(`ready as agent #${config.saltAppId} (${config.host}); ${handlers.toolCount} tools exposed${check.status === "ok" ? "" : " (credentials not verified)"}`);
+  // Only now: a pushed event before the handshake finishes has nowhere to go.
+  if (channel) {
+    // The held websocket would otherwise keep this process alive after Claude Code closes the pipe.
+    const shutdown = () => channel.stop().finally(() => process.exit(0));
+    process.stdin.once("end", shutdown);
+    process.stdin.once("close", shutdown);
+    channel.start();
+  }
+  log(`ready as agent #${config.saltAppId} (${config.host}); ${handlers.toolCount} tools exposed${check.status === "ok" ? "" : " (credentials not verified)"}${channel ? "; CHANNEL MODE: pushing allow-listed Salt messages into Claude Code" : ""}`);
 }
 
-/** The MCP Server around createLocalHandlers' two functions; exported so a test can run it over an in-memory transport. */
-export function buildLocalServer(handlers) {
+/**
+ * The MCP Server around createLocalHandlers' two functions; exported so a test can run it over an in-memory transport.
+ * With a `channel` bridge it also declares the Claude Code channel capabilities (message push and permission relay)
+ * and the instructions that tell Claude how to read and answer the events. Without one, nothing channel-shaped is declared.
+ *
+ * Protocol revision: the channel only registers in Claude Code when the handshake settles on a revision it can deliver
+ * channel messages over. @modelcontextprotocol/sdk 1.x negotiates at most 2025-11-25 (tests/channel.test.mjs pins that),
+ * so this server never negotiates 2026-07-28 and registers on both Claude Code runtimes.
+ */
+export function buildLocalServer(handlers, { channel } = {}) {
   const server = new Server(
     { name: "salt-mcp", version: PACKAGE_VERSION },
-    { capabilities: { tools: {} } }
+    channel
+      ? {
+          capabilities: { tools: {}, experimental: { [CHANNEL_CAPABILITY]: {}, [CHANNEL_PERMISSION_CAPABILITY]: {} } },
+          instructions: CHANNEL_INSTRUCTIONS,
+        }
+      : { capabilities: { tools: {} } }
   );
+  channel?.attach(server);
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: handlers.listTools() }));
 
