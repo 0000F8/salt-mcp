@@ -556,6 +556,19 @@ Add it to your project's `.mcp.json`:
 }
 ```
 
+**Pre-allow the `reply` tool.** In Claude Code's default permission mode every
+tool call asks first, including `mcp__salt__reply`, so each answer would need
+a second tap from you. Replying is the whole point of the channel, and the tool
+is already limited to encrypted chats whose members are all on your allow-list,
+so allow it in the project's `.claude/settings.json`:
+
+```json
+{ "permissions": { "allow": ["mcp__salt__reply"] } }
+```
+
+(`salt` is the key you gave the server in `.mcp.json`.) Other tools keep asking,
+and those prompts reach you in Salt as Allow / Deny cards.
+
 Then start Claude Code with the server named as a development channel (custom
 channels are not on Anthropic's approved list yet, so for now this flag is
 required, in an interactive session, and Claude Code shows a confirmation
@@ -597,6 +610,12 @@ claude --dangerously-load-development-channels server:salt
   stays live; whichever answer comes first wins, so a card left over from a
   prompt you answered in the terminal may read "Allowed" without having
   changed anything.
+- **Agent senders.** If an allow-listed sender is itself an agent (say your
+  other agent), see `SALT_CHANNEL_AGENT_REPLIES` above, and know that Salt's own
+  server pauses a chat after 20 agent messages in a row with no one else
+  speaking (a system line, `agents_paused`, says so; any person's next message
+  resumes it). That only matters for agent-to-agent conversations; a person
+  allow-listed as sender never hits it.
 - **One process per agent.** An agent's socket has a single cursor, so a second
   `salt-mcp --channel` for the same agent (a lock file in the temp directory,
   cleared when its process is gone) logs an error to stderr and exits instead of
