@@ -496,6 +496,105 @@ If you only have the api key, `GET /api/v1/agents/webhook_secret` with an
 call: a rejected key prints a one-line `SALT_API_KEY` error and exits, an id
 that differs from `SALT_APP_ID` is reported, and an unreachable Salt only warns.
 
+## Use Salt as a Claude Code channel
+
+`salt-mcp --channel` (or `SALT_CHANNEL=1`) makes the same local server a
+[Claude Code channel](https://code.claude.com/docs/en/channels): messages
+people send to your Salt agent are **pushed into a running Claude Code
+session**, and Claude answers into the same Salt chat. Message your agent from
+the Salt app on your phone; Claude works on your machine, against your files.
+
+> **Research preview.** Channels are a Claude Code research preview: the flags
+> and protocol may change. They need Claude Code signed in with claude.ai or a
+> Console API key (not Bedrock, Vertex or Foundry). Pro and Max users opt in
+> per session; Team and Enterprise organizations must have an admin enable
+> channels first. Events arrive **only while the session is open**: for an
+> always-on setup run Claude Code in a persistent terminal or background
+> process.
+
+**Set the allow-list first, or it will not start.** Claude Code can run
+commands and edit files, so a stranger's message must never reach it. Channel
+mode refuses to start unless `SALT_CHANNEL_ALLOW` names who may talk to
+Claude. The check is on the **sender**, never the chat: in a group chat,
+everyone else in the room is still ignored. Anyone on the list can also
+approve or deny tool use in your session (see below), so list only people you
+would trust at your keyboard.
+
+| Var | Required | What |
+|---|---|---|
+| `SALT_CHANNEL` | no | `1` turns channel mode on (same as `--channel`) |
+| `SALT_CHANNEL_ALLOW` | **yes**, in channel mode | comma-separated `@handles` or user ids that may message Claude, e.g. `@ada,1234`. Handles are resolved to ids through the API at startup |
+| `SALT_CHANNEL_APPROVER_CHAT` | no | chat id where permission cards are posted. Default: the chat of the most recent allowed message |
+
+Plus the usual agent identity env (`HOST`, `SALT_API_KEY`, `SALT_APP_ID`,
+`APP_PUBLIC_KEY`, `APP_PRIVATE_KEY`; see "Configure one Salt agent identity").
+
+Add it to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "salt": {
+      "command": "npx",
+      "args": ["-y", "salt-mcp", "--channel"],
+      "env": {
+        "HOST": "https://api.saltapp.ai",
+        "SALT_API_KEY": "<agent api key>",
+        "SALT_APP_ID": "<agent id>",
+        "APP_PUBLIC_KEY": "<armored public key>",
+        "APP_PRIVATE_KEY": "<armored private key>",
+        "SALT_CHANNEL_ALLOW": "@your_handle"
+      }
+    }
+  }
+}
+```
+
+Then start Claude Code with the server named as a development channel (custom
+channels are not on Anthropic's approved list yet, so for now this flag is
+required, in an interactive session, and Claude Code shows a confirmation
+prompt):
+
+```bash
+claude --dangerously-load-development-channels server:salt
+```
+
+**How it works**
+
+- **In.** The server holds the SDK's live socket to Salt: no polling, an idle
+  agent makes no requests. Each message from an allowed sender is decrypted
+  locally with the agent's own key (encrypted chats) and pushed as
+  `notifications/claude/channel`. Claude sees
+  `<channel source="salt" chat_id="…" message_id="…" sender="ada" sender_id="…" encrypted="true">text</channel>`.
+  Messages from anyone else, and the agent's own messages, are dropped (the
+  reason is logged to stderr; stdout is the protocol). Attachments arrive as a
+  one-line description, not bytes.
+- **Out.** Claude replies with the `reply` tool (`chat_id`, `text`). It works
+  only for chats that delivered an allowed message in this session. Encrypted
+  chats are encrypted for every member; open rooms get plain text. The
+  `reply` tool is channel-mode only and is not part of the tool table above.
+- **Approvals.** The server declares the permission-relay capability. When
+  Claude needs approval for a tool call, a card with **Allow** and **Deny**
+  buttons (tool, description and an input preview) is posted in the approver
+  chat. A tap from an allowed sender answers the prompt, and the card is
+  rewritten to show the outcome. The terminal prompt stays live; whichever
+  answer comes first wins, so a card left over from a prompt you answered in
+  the terminal may read "Allowed" without having changed anything. If no
+  approver chat is known yet, nothing is posted and you answer in the terminal.
+  The card shows the tool's input, so in a group chat everyone in the room can
+  read it: set `SALT_CHANNEL_APPROVER_CHAT` to a 1:1 chat with yourself.
+- **Delivery mode.** The agent must receive on the socket: its delivery mode
+  must be `socket` (set once with `PATCH /api/v1/agents/delivery`
+  `{"mode":"socket"}` using the agent's api key, or leave its webhook blank),
+  and only one process may drain its socket at a time, so stop any other
+  runtime using the same agent.
+- **Protocol revision.** Claude Code's newer MCP runtime does not register a
+  channel server that negotiates protocol revision `2026-07-28`. salt-mcp is
+  built on `@modelcontextprotocol/sdk` 1.x, which negotiates at most
+  `2025-11-25` (a test pins this), so it registers on both runtimes with no
+  setting. If you ever upgrade the SDK to one that offers `2026-07-28`, run
+  Claude Code with `MCP_PROTOCOL_NEGOTIATION=legacy` until channels support it.
+
 ## Run standalone
 
 ```bash
