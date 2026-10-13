@@ -109,16 +109,20 @@ commit a `file:`-referenced dependency.
   is what catches it, never trust the README's own tool count (see below).
 - **Channel mode (`src/channel.mjs`, `--channel`) is the reference for
   bridging a Claude Code session.** It holds the SDK's live socket (never
-  polls), gates on the SENDER against `SALT_CHANNEL_ALLOW` (never the chat;
-  no allow-list means it refuses to start), pushes
-  `notifications/claude/channel`, answers through its `reply` tool, and relays
-  permission prompts as cards. Its `reply` tool is not an SDK action, so its
-  annotations live in `channel.mjs` (`REPLY_TOOL`), not in `TOOL_ANNOTATIONS`
-  (that map is checked against the SDK catalog), and it stays out of the
-  README tool table (`tests/readme-tools.test.mjs`). Keep the SDK on
-  `@modelcontextprotocol/sdk` 1.x: a revision-`2026-07-28` handshake makes
-  Claude Code's v2 runtime refuse to register the channel
-  (`tests/channel.test.mjs` pins it).
+  polls) and gates on the SENDER's user id against `SALT_CHANNEL_ALLOW`: ids
+  only (handles are resolved at startup and an unresolved one stops the
+  server; a username is never matched, it can be squatted), never the chat; no
+  allow-list means it refuses to start. It pushes `notifications/claude/channel`,
+  answers through its `reply` tool (only into encrypted chats whose other
+  members are all allow-listed, re-checked per reply) and relays permission
+  prompts as an encrypted details message plus a card with no input in it (card
+  state is plaintext on Salt's server). One process per agent, by lock file.
+  Its `reply` tool is not an SDK action, so its annotations live in
+  `channel.mjs` (`REPLY_TOOL`), not in `TOOL_ANNOTATIONS` (that map is checked
+  against the SDK catalog), and it stays out of the README tool table
+  (`tests/readme-tools.test.mjs`). Keep the SDK on `@modelcontextprotocol/sdk`
+  1.x: a revision-`2026-07-28` handshake makes Claude Code's v2 runtime refuse
+  to register the channel (`tests/channel.test.mjs` pins it).
 - **A card tool waits on its OWN card, never the shared outbox.** The
   socket-mode outbox (`GET /api/v1/agent/updates`) has exactly ONE
   forward-only cursor per agent; any `after=` passed to it permanently

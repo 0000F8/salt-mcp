@@ -36,6 +36,8 @@ import {
   ChannelConfigError,
   loadChannelConfig,
   resolveAllowList,
+  verifyApproverChat,
+  acquireChannelLock,
   createChannelBridge,
   sdkSocketFactory,
 } from "./channel.mjs";
@@ -192,16 +194,29 @@ async function main() {
   let channel;
   let server;
   if (channelConfig.enabled) {
-    const allow = await resolveAllowList({ client, apiKey: caller.apiKey, allow: channelConfig.allow, log });
-    channel = createChannelBridge({
-      client,
-      caller,
-      allow,
-      approverChat: channelConfig.approverChat,
-      notify: (method, params) => server.notification({ method, params }),
-      createSocket: sdkSocketFactory({ client, identities, config, caller, log }),
-      log: (...args) => log(...args),
-    });
+    try {
+      // One reader per agent: its socket has a single cursor.
+      const release = acquireChannelLock(config.saltAppId);
+      process.once("exit", release);
+      const allowedIds = await resolveAllowList({ client, apiKey: caller.apiKey, allow: channelConfig.allow });
+      if (channelConfig.approverChat) {
+        await verifyApproverChat({ client, apiKey: caller.apiKey, selfId: caller.saltAppId, chatId: channelConfig.approverChat, allowedIds });
+      }
+      channel = createChannelBridge({
+        client,
+        caller,
+        allowedIds,
+        approverChat: channelConfig.approverChat,
+        openRooms: channelConfig.openRooms,
+        notify: (method, params) => server.notification({ method, params }),
+        createSocket: sdkSocketFactory({ client, identities, config, caller, log }),
+        log: (...args) => log(...args),
+      });
+    } catch (err) {
+      if (!(err instanceof ChannelConfigError)) throw err;
+      log(`ERROR: ${err.message}`);
+      process.exit(1);
+    }
   }
 
   const handlers = createLocalHandlers({ actions, caller, host: config.host, decrypt, channel });
