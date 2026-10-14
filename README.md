@@ -656,6 +656,8 @@ claude mcp add salt-me -e SALT_ME_EMAIL=you@example.com -- node /path/to/salt-mc
 The first time your AI asks for a chat, a macOS dialog appears: "Salt MCP
 wants to read your chats on this Mac. Enter your Salt password." Type it into
 the hidden field, or press Cancel to refuse (your AI is told you chose not to).
+Only enter your password right after you've asked your AI to read your Salt
+chats; if this dialog appears any other time, press Cancel.
 Then ask Claude things like "what did Ada say in the Launch crew chat?" or
 "summarise my unread chats".
 
