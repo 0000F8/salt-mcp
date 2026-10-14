@@ -10,7 +10,7 @@
 import { createRequire } from "node:module";
 
 let openpgpPromise;
-function loadOpenpgp() {
+export function loadOpenpgp() {
   if (!openpgpPromise) {
     const sdkEntry = import.meta.resolve("salt-agent-sdk");
     openpgpPromise = Promise.resolve(createRequire(sdkEntry)("openpgp"));

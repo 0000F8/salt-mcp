@@ -17,7 +17,8 @@
 //   PGP_PASSPHRASE  (+ optional WALLET_MASTER_KEY, CONCIERGE_AGENT_ID).
 // Every tool call acts AS that agent.
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -275,6 +276,33 @@ export function buildLocalServer(handlers, { channel } = {}) {
   return server;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+// `salt-mcp --as-me` / `--as-me-setup <email>` are a different server (the owner's own chats, on their own computer),
+// so they branch off before any agent env or channel config is read.
+async function runMeMode(args) {
+  try {
+    const me = await import("./me-cli.mjs");
+    const setupAt = args.indexOf("--as-me-setup");
+    if (setupAt >= 0) console.log(await me.runAsMeSetup(args[setupAt + 1]));
+    else await me.runAsMe({ argv: args });
+  } catch (err) {
+    log(`ERROR: ${err?.message || err}`);
+    process.exit(1);
+  }
+}
+
+// An installed bin is a symlink (node_modules/.bin/salt-mcp): process.argv[1] keeps the link's path while
+// import.meta.url is the real file, so compare real paths too, or `npx salt-mcp` would start nothing.
+const isEntryPoint = () => {
+  if (import.meta.url === `file://${process.argv[1]}`) return true;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+};
+
+if (isEntryPoint()) {
+  const args = process.argv.slice(2);
+  if (args.includes("--as-me") || args.includes("--as-me-setup")) runMeMode(args);
+  else main();
 }
