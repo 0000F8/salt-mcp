@@ -23,7 +23,7 @@ import {
   MAX_ATTACHMENT_BYTES,
 } from "./me-crypto.mjs";
 
-export const DEFAULT_HOST = "https://api.saltapp.ai";
+export const DEFAULT_HOST = "https://saltapp.ai";
 
 export class MeError extends Error {
   constructor(message, { status, kind } = {}) {

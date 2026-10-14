@@ -130,3 +130,8 @@ test("the sign-in only goes to an https host, or one on this computer", async ()
   await assert.rejects(runAsMeSetup(EMAIL, { platform: "darwin", env: { HOST: "not a url" }, secrets, ask: never }), /web address/);
   await assert.rejects(runAsMeSetup(EMAIL, { platform: "darwin", env: { HOST: "http://localhost:3000" }, secrets, ask: never }), /must not ask/, "localhost passes the check");
 });
+
+test("the default host is the origin the Salt website uses", async () => {
+  const { DEFAULT_HOST } = await import("../src/me-session.mjs");
+  assert.equal(DEFAULT_HOST, "https://saltapp.ai");
+});

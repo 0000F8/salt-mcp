@@ -65,7 +65,7 @@ verified against `package.json` and the repo root, don't invent one.
   specific shape (npm package env vars, hosted remote's required secret
   headers).
 
-Run the whole suite before every commit (336 tests on `feat/as-me`, about
+Run the whole suite before every commit (337 tests on `feat/as-me`, about
 30 seconds).
 
 **`salt-agent-sdk` comes from npm** (`^0.18.0`, published 2026-10-14), so a
