@@ -65,7 +65,7 @@ verified against `package.json` and the repo root, don't invent one.
   specific shape (npm package env vars, hosted remote's required secret
   headers).
 
-Run the whole suite before every commit (337 tests on `feat/as-me`, about
+Run the whole suite before every commit (349 tests on `feat/as-me`, about
 30 seconds).
 
 **`salt-agent-sdk` comes from npm** (`^0.18.0`, published 2026-10-14), so a
@@ -127,27 +127,43 @@ this repo by publishing the SDK first, then bumping the range here.
   to register the channel (`tests/channel.test.mjs` pins it).
 - **`--as-me` (`src/me-*.mjs`) is the owner's own chats, locally, as the
   owner -- a different identity from everything above.** `index.mjs` branches to
-  `src/me-cli.mjs` on `--as-me` / `--as-me-setup <email>` before any agent env
-  is read. Layers: `me-crypto.mjs` (ports of salt-fe `passwordDerivation.js`,
-  `walletVault.js`, `messageKey.js`, `encrypt.jsx`, `attachments.js`),
-  `me-markers.mjs` (port of `messages.jsx`' wire-marker stripping),
-  `me-secrets.mjs` (Keychain via `security`, the two osascript dialogs),
-  `me-session.mjs` (sign in once, lazy unlock, 401 re-sign-in, failure
-  memory), `me-tools.mjs` (the `salt_me_*` tools), `me-cli.mjs` (server +
-  setup). Rules that bite: **read tools only ever call `session.get` /
-  `getBytes`** (no mark_read, typing or any side effect; a test records every
-  request); `salt_me_send` exists only with `--allow-send` and sends only after
-  the injected `confirmSend` dialog returns true; the password, DEK and key
-  live in memory only and must never reach a log, a tool result or an error
-  message (a test scans for them); the wallets DEK is never unwrapped;
-  everything external is `execFile` with an argument array (the dialogs get
-  chat names and text as `argv`, never spliced into AppleScript); sign in at
-  most once per failure window (Rack::Attack allows 5 per 20 s). When
-  salt-fe's `stripWireMarkers`, vault wrap AAD strings or attachment format
+  `src/me-cli.mjs` on `--as-me` before any agent env is read. Layers:
+  `me-crypto.mjs` (ports of salt-fe `passwordDerivation.js`, `walletVault.js`,
+  `messageKey.js`, `encrypt.jsx`, `attachments.js`), `me-markers.mjs` (port of
+  `messages.jsx`' wire-marker stripping), `me-secrets.mjs` (the hidden password
+  dialog, the Send dialog), `me-session.mjs` (sign in once, lazy unlock, 401
+  re-sign-in, failure memory, sign-out), `me-tools.mjs` (the `salt_me_*` tools),
+  `me-cli.mjs` (server, host/TLS checks, exit sign-out). Rules that bite:
+  - **Store nothing.** No Keychain item, no file, no cache. A Keychain item
+    made by `security` is readable without a prompt by any process of the user
+    (an AI with a shell, steered by a chat message, included) and the login
+    password also opens the wallets DEK. The password is asked for in a hidden
+    dialog on the first tool call, lives in `unlock()` only, and is dropped.
+    Do not add a "remember" option without a design that survives that.
+  - **Read tools only call `session.get` / `getBytes`** (no mark_read, typing or
+    any side effect; a test records every request). The wallets DEK is never
+    unwrapped.
+  - `salt_me_send` exists only with `--allow-send` and sends only after the
+    injected `confirmSend` dialog returns true. The dialog text is built from
+    server-verified facts (member list, count, open room) with names cleaned of
+    control/format characters; the message must have no control, direction or
+    zero-width characters and fit (1000 chars, 20 lines), so what is shown is
+    byte-identical to what is encrypted.
+  - Dialog text reaches osascript on **stdin** as an escaped string literal
+    (`appleScriptString`), never as an argument; everything else external is
+    `execFile` with an argument array.
+  - Every decrypted message text returned to the AI is prefixed with
+    `DATA_LABEL`; a new tool that returns decrypted text must do the same and say
+    so in its description.
+  - No secret in a log, error or tool result (a test scans). Sign in once per
+    failure window (Rack::Attack: 5 per 20 s) and sign out on exit.
+  - Refuse to start with `NODE_TLS_REJECT_UNAUTHORIZED=0` or
+    `NODE_EXTRA_CA_CERTS` unless HOST is local.
+  When salt-fe's `stripWireMarkers`, vault wrap AAD strings or attachment format
   change, change the port and its test vectors in the same commit. Known
-  AI-first gap, on purpose: setup needs the owner at a hidden dialog, because
-  the owner's AI must never see the password. Tests use `tests/me-fixtures.mjs`
-  (a fake Salt with a real vault and real PGP).
+  AI-first gap, on purpose: the unlock needs the owner at a hidden dialog,
+  because the owner's AI must never see the password. Tests use
+  `tests/me-fixtures.mjs` (a fake Salt with a real vault and real PGP).
 - **A card tool waits on its OWN card, never the shared outbox.** The
   socket-mode outbox (`GET /api/v1/agent/updates`) has exactly ONE
   forward-only cursor per agent; any `after=` passed to it permanently
