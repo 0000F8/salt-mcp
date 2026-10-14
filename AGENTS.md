@@ -65,19 +65,16 @@ verified against `package.json` and the repo root, don't invent one.
   specific shape (npm package env vars, hosted remote's required secret
   headers).
 
-Run the whole suite before every commit (181 tests as of this writing, well
+Run the whole suite before every commit (260 tests as of 0.3.0, well
 under a few seconds).
 
-**`npm install` alone can fail** (`ETARGET: No matching version found for
-salt-agent-sdk@...`) on a clean checkout: `salt-agent-sdk`'s npm registry
-listing is stuck at an old `0.1.0` (see "Publishing" below — same situation
-as this repo's own npm listing), well behind the sibling repo's real version.
-If that happens, install the local sibling checkout instead:
-`npm install ../salt-agent-sdk` — this rewrites `package.json`'s dependency
-to a local reference. **Always restore the original semver range in
-`package.json`/`package-lock.json` before committing** (`git checkout --
-package.json package-lock.json` if you made no other change to them). Never
-commit a `file:`-referenced dependency.
+**`salt-agent-sdk` comes from npm** (`^0.18.0`, published 2026-10-14), so a
+plain `npm install` works on a clean checkout. To try unpublished SDK work,
+`npm install ../salt-agent-sdk` temporarily, but **never commit the result**:
+it rewrites `package.json` and leaves a `"link": true` entry in
+`package-lock.json`, which breaks `npm ci` in CI and Docker (0.3.0 had to undo
+exactly that). Restore both files before committing. A new SDK feature reaches
+this repo by publishing the SDK first, then bumping the range here.
 
 ## Layout
 
@@ -188,12 +185,12 @@ commit a `file:`-referenced dependency.
 
 ## Publishing
 
-- **npm has a stale `salt-mcp@0.1.0`.** It is ancient and far behind this
-  repo's current version — do not treat it as current, safe to install
-  standalone, or a reference for docs. The Docker image and the `.mcpb`
-  bundle (below) are built straight from this repo's checked-out source, not
-  from that npm listing. The same staleness applies to the `salt-agent-sdk`
-  dependency itself (see "Commands" above).
+- **npm**: `salt-mcp` 0.3.0 was published 2026-10-14 from the owner's
+  machine with the vault token (`python3 ../salt-deploy/scripts/vault.py
+  with-secret --env NODE_AUTH_TOKEN npm token -- npm publish --access public`;
+  never print the token). `salt-agent-sdk` must already be on npm at the range
+  `package.json` names. `.github/workflows/publish.yml` (tag push, provenance)
+  is the intended path once Trusted Publishing is set up on npmjs.com.
 - `ghcr.io/0000f8/salt-mcp` — a public, multi-arch container built by
   `.github/workflows/image.yml` on every GitHub release.
 - `salt.mcpb` — the Claude Desktop bundle, built with `npm run bundle`
