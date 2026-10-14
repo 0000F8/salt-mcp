@@ -631,6 +631,82 @@ claude --dangerously-load-development-channels server:salt
   setting. If you ever upgrade the SDK to one that offers `2026-07-28`, run
   Claude Code with `MCP_PROTOCOL_NEGOTIATION=legacy` until channels support it.
 
+## Read your own chats (local, `--as-me`)
+
+`salt-mcp --as-me` lets **your own AI read your own Salt chats**, exactly as the
+Salt website shows them to you. It is a local stdio server that runs on your
+Mac, signs in to Salt **as you**, unlocks your messages key **on this computer**
+with your password, and hands your AI the decrypted text. Salt's servers see
+nothing they could not see before: the same ciphertext goes to the same
+person, and your password never leaves your machine. It is **read-only** unless
+you start it with `--allow-send`.
+
+```bash
+# 1. Once: save your Salt password in the macOS Keychain (a hidden prompt; it checks the password by signing in)
+npx salt-mcp --as-me-setup you@example.com
+
+# 2. Add it to Claude Code
+claude mcp add salt-me -- npx salt-mcp --as-me
+```
+
+To run it from a checkout instead of npm (for example this branch's worktree):
+
+```bash
+node /path/to/salt-mcp/src/index.mjs --as-me-setup you@example.com
+claude mcp add salt-me -- node /path/to/salt-mcp/src/index.mjs --as-me
+```
+
+Then ask Claude things like "what did Ada say in the Launch crew chat?" or
+"summarise my unread chats".
+
+**What you are trusting, in plain words.** Everything is decrypted on this
+computer. Salt's servers never see your password, your key or any plaintext.
+But whatever your AI reads is, by definition, sent on to the company that runs
+your AI's model, the same as anything else you paste into it. Only point this at
+an AI you are happy to show those chats to. Message text was written by other
+people and agents, so the server tells the AI to treat it as data and never as
+instructions; a chat can still try to talk your AI into things, so keep
+`--allow-send` off unless you want your AI to speak for you.
+
+**Tools** (all start with `salt_me_`):
+
+- `salt_me_list_chats` lists your chats (`filter`: all, groups, people, agents, requests; `query`) with members, unread count, last activity and a decrypted one-line preview.
+- `salt_me_read_chat` reads messages oldest to newest (`chat_id` or `name`, `limit` 1 to 200, default 50, `before_message_id` to go further back). It pages for you. A message that reads `[Encrypted]` was sent before you joined that chat.
+- `salt_me_find_chat` finds a chat by a fuzzy match on its name and on member names and @handles.
+- `salt_me_read_attachment` opens a file: text-like files as text (up to 1 MB), images as images, anything else as its name, type and size. Files over 15 MB are not downloaded.
+- `salt_me_whoami` says which account this is, whether it is unlocked, the lock mode and how old the sign-in is. It shows no secret.
+
+Reading never marks anything as read and never changes anything on Salt.
+
+**Sending (off by default).** `--allow-send` adds `salt_me_send`
+(`chat_id`, `text`, optional `mentions`). Before anything is sent, a native
+macOS dialog shows the chat and the **full text** with two buttons, "Send" and
+"Don't send". Only "Send" sends. The message is encrypted on this computer for
+everyone in the chat, you included, like a message you typed yourself.
+
+**Where the password lives.** In the macOS Keychain, in an item named
+`salt-mcp-me` (account: your email). It is not an environment variable and it is
+never in the tool arguments or output, so your AI cannot read it. The server
+holds the password, the unlocked key and the session token in memory only, writes
+no plaintext to disk and logs none of it. It signs in once, the first time a
+tool is used, and again only if the 30-day session ends.
+
+- If your Salt lock password is a **separate** one (Security settings: "use a separate password"), setup asks for it too and saves it as a second Keychain item, `salt-mcp-me-vault`. With the default, one password for both, there is nothing extra.
+- Accounts that have never signed in on saltapp.ai since the one-password change cannot sign in from here: sign in on saltapp.ai once, then try again.
+- Your wallets are never opened. Only the messages key is.
+
+If it cannot unlock, the AI is told one sentence: "Couldn't unlock: check the
+password saved for Salt MCP (run salt-mcp --as-me-setup)".
+
+**Settings** (environment variables, all optional): `SALT_ME_EMAIL` (otherwise
+the account saved by setup), `HOST` (default `https://api.saltapp.ai`).
+
+**Not on a Mac?** `--as-me` refuses to start without the Keychain unless you set
+`SALT_ME_PASSWORD_CMD` to a command that prints your Salt password, for example
+`secret-tool lookup service salt` on Linux (and `SALT_ME_VAULT_PASSWORD_CMD` for
+a separate lock password), plus `SALT_ME_EMAIL`. There is no native confirmation
+dialog off macOS, so `--allow-send` cannot send there.
+
 ## Run standalone
 
 ```bash
