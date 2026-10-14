@@ -8,12 +8,13 @@
 //             remembers a failure for a while instead of retrying on every tool call.
 //   unlock    GET /api/v1/userkeys, and (for a vault key) GET /api/v1/vault; see me-crypto.mjs.
 //
-// Everything is lazy: nothing happens until the first tool call. The raw
-// password, the vault wrap and the DEK exist only inside unlock(); what
-// stays in memory is the signed-in token and the opened PGP key. Nothing in
-// this file writes to disk, and no request, header or body is ever logged.
+// Everything is lazy: nothing happens until the first tool call, which asks
+// the owner for the password (me-secrets.mjs). The raw password, the vault wrap
+// and the DEK exist only inside unlock(); the password reference is dropped when
+// it returns and what stays in memory is the signed-in token and the opened PGP
+// key. On exit signOut() revokes the token. Nothing in this file writes to disk,
+// and no request, header or body is ever logged.
 
-import { KEYCHAIN_SERVICE, KEYCHAIN_VAULT_SERVICE } from "./me-secrets.mjs";
 import {
   authString,
   unwrapMessagesDek,
@@ -34,23 +35,24 @@ export class MeError extends Error {
   }
 }
 
-export const UNLOCK_FAILED = "Couldn't unlock: check the password saved for Salt MCP (run salt-mcp --as-me-setup)";
+export const UNLOCK_FAILED = "Couldn't unlock: the Salt password didn't open your messages key. Try again.";
 export const SIGN_IN_FAILED =
-  "Couldn't sign in: check the password saved for Salt MCP (run salt-mcp --as-me-setup). If this account is older, sign in on saltapp.ai once, then try again.";
+  "Couldn't sign in: check the Salt password. If this account is older, sign in on saltapp.ai once, then try again.";
 
 const REQUEST_TIMEOUT_MS = 30000;
-// A failed unlock is remembered this long, so a wrong password costs one sign-in, not one per tool call.
-const FAILURE_MEMORY_MS = 60000;
+// A failed (or declined) unlock is remembered this long, so a wrong password costs one sign-in and a cancelled dialog
+// does not come straight back, instead of once per tool call.
+const FAILURE_MEMORY_MS = 30000;
 
 /**
  * @param {{
- *   host?: string, email: string,
- *   readPassword: (service: string) => Promise<string>,
+ *   host?: string, email?: string, readEmail?: () => Promise<string>,
+ *   readPassword: (kind: "login"|"vault") => Promise<string>,
  *   fetchImpl?: typeof fetch, now?: () => number, signInIterations?: number,
  * }} options
  * `signInIterations` exists for tests; production never passes it.
  */
-export function createMeSession({ host = DEFAULT_HOST, email, readPassword, fetchImpl, now = () => Date.now(), signInIterations }) {
+export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, readPassword, fetchImpl, now = () => Date.now(), signInIterations }) {
   const base = host.replace(/\/$/, "");
   const doFetch = fetchImpl ?? fetch;
 
@@ -85,7 +87,8 @@ export function createMeSession({ host = DEFAULT_HOST, email, readPassword, fetc
   }
 
   async function signIn() {
-    const password = await readPassword(KEYCHAIN_SERVICE);
+    email ??= await readEmail();
+    const password = await readPassword("login");
     const secret = await authString(password, signInIterations);
     const res = await send("POST", "/auth/sign_in", { body: { user: { email, password: secret } }, authed: false });
     if (res.status === 401 || res.status === 403) throw new MeError(SIGN_IN_FAILED, { status: res.status, kind: "sign_in" });
@@ -119,7 +122,7 @@ export function createMeSession({ host = DEFAULT_HOST, email, readPassword, fetc
   }
 
   async function ensureSignedIn() {
-    signInFlight ??= signIn().finally(() => {
+    signInFlight ??= signIn().then(() => undefined).finally(() => {
       signInFlight = null;
     });
     return signInFlight;
@@ -169,13 +172,15 @@ export function createMeSession({ host = DEFAULT_HOST, email, readPassword, fetc
     if (userKey?.encrypted_private_key) {
       const vault = await getJson("/api/v1/vault");
       lockMode = vault?.lock_mode ?? null;
-      let vaultPassword = password;
-      if (lockMode !== "login") {
-        // A separate vault password lives in its own Keychain item. If none was saved, the login password is tried
-        // once, because plenty of "separate" vaults were set to the same words.
-        vaultPassword = await readPassword(KEYCHAIN_VAULT_SERVICE).catch(() => password);
+      let dek;
+      try {
+        dek = await unwrapMessagesDek({ vault, vaultPassword: password });
+      } catch (err) {
+        // A separate lock password: the login password is tried first because plenty of "separate" vaults were set
+        // to the same words; only if it does not open the vault is the owner asked for the second one.
+        if (lockMode === "login") throw err;
+        dek = await unwrapMessagesDek({ vault, vaultPassword: await readPassword("vault") });
       }
-      const dek = await unwrapMessagesDek({ vault, vaultPassword });
       armored = await readArmoredPrivateKey({ userKey, dek });
     } else {
       lockMode = "legacy";
@@ -197,7 +202,7 @@ export function createMeSession({ host = DEFAULT_HOST, email, readPassword, fetc
         token = null;
         privateKey = null;
         decryptText = null;
-        const error = err instanceof MeError ? err : new MeError(UNLOCK_FAILED, { kind: "unlock" });
+        const error = err instanceof MeError ? err : err?.declined ? new MeError(err.message, { kind: "declined" }) : new MeError(UNLOCK_FAILED, { kind: "unlock" });
         failure = { error, at: now() };
         throw error;
       })
@@ -207,8 +212,25 @@ export function createMeSession({ host = DEFAULT_HOST, email, readPassword, fetc
     return unlocking;
   }
 
+  /** Revokes this process's session and lets go of the key. Best effort, once; safe to call at any time. */
+  async function signOut() {
+    const had = token;
+    token = null;
+    privateKey = null;
+    decryptText = null;
+    if (!had) return;
+    try {
+      await doFetch(`${base}/auth/sign_out`, { method: "DELETE", headers: { Accept: "application/json", Authorization: had }, signal: AbortSignal.timeout(3000) });
+    } catch {
+      // The session simply runs out in 30 days; nothing else to do on the way out.
+    }
+  }
+
   return {
-    email,
+    get email() {
+      return email;
+    },
+    signOut,
     ensureUnlocked,
     /** Reads and writes sign in and unlock first, so a tool never reaches Salt without the key being ready. */
     get: async (path) => (await ensureUnlocked(), getJson(path)),

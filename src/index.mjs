@@ -280,10 +280,11 @@ export function buildLocalServer(handlers, { channel } = {}) {
 // so they branch off before any agent env or channel config is read.
 async function runMeMode(args) {
   try {
-    const me = await import("./me-cli.mjs");
-    const setupAt = args.indexOf("--as-me-setup");
-    if (setupAt >= 0) console.log(await me.runAsMeSetup(args[setupAt + 1]));
-    else await me.runAsMe({ argv: args });
+    if (args.includes("--as-me-setup")) {
+      console.log("There is no setup step any more: salt-mcp --as-me asks for your Salt password in a dialog when it first needs it, and saves nothing.");
+      return;
+    }
+    await (await import("./me-cli.mjs")).runAsMe({ argv: args });
   } catch (err) {
     log(`ERROR: ${err?.message || err}`);
     process.exit(1);

@@ -1,145 +1,181 @@
-// Where --as-me finds the password (src/me-secrets.mjs): the macOS Keychain through `security`, started with an
-// argument array and never a shell string; a configured command for non-Macs; hex-encoded stdin for saving; and the
-// two native dialogs. execFile is a fake, so nothing touches the real Keychain or screen.
+// Where --as-me gets the password (src/me-secrets.mjs): a hidden native dialog, or the owner's own command off macOS.
+// Nothing is stored. Dialog scripts go to osascript on stdin, so no password prompt or message text is in any argv.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   createSecrets,
   createSendConfirmation,
-  askHiddenPassword,
+  askDialog,
+  appleScriptString,
+  buildSendDialogText,
+  cleanName,
   SecretsError,
-  KEYCHAIN_SERVICE,
-  KEYCHAIN_VAULT_SERVICE,
+  DECLINED,
 } from "../src/me-secrets.mjs";
 
-const SECRET = "p4ss \"quoted\" 'x' \\ $(touch pwned) é\n second line";
-
-function fakeExec(handler) {
-  const calls = [];
-  const execFile = async (file, args, opts) => {
-    calls.push({ file, args, opts });
-    return handler(file, args, opts);
+function fakeScript(handler) {
+  const scripts = [];
+  const runScript = async (script) => {
+    scripts.push(script);
+    return handler(script);
   };
-  return { execFile, calls };
+  return { runScript, scripts };
 }
+const fakeExec = (handler) => {
+  const calls = [];
+  return { calls, execFile: async (file, args, opts) => (calls.push({ file, args, opts }), handler(file, args)) };
+};
 
-test("readPassword asks the Keychain with an argument array", async () => {
-  const { execFile, calls } = fakeExec(() => ({ stdout: "hunter2\n", stderr: "" }));
-  const secrets = createSecrets({ execFile, env: {}, platform: "darwin" });
-  assert.equal(await secrets.readPassword("me@example.test"), "hunter2");
-  assert.deepEqual(calls[0], { file: "security", args: ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", "me@example.test", "-w"], opts: calls[0].opts });
-  await secrets.readPassword("me@example.test", KEYCHAIN_VAULT_SERVICE);
-  assert.deepEqual(calls[1].args, ["find-generic-password", "-s", "salt-mcp-me-vault", "-a", "me@example.test", "-w"]);
+test("the password comes from a hidden dialog with the agreed wording; nothing is stored or executed", async () => {
+  const { runScript, scripts } = fakeScript(() => "typed secret\n");
+  const exec = fakeExec(() => { throw new Error("no program should run"); });
+  const secrets = createSecrets({ runScript, execFile: exec.execFile, env: {}, platform: "darwin" });
+  assert.equal(await secrets.readPassword("login"), "typed secret");
+  assert.equal(scripts.length, 1);
+  assert.ok(scripts[0].includes("Salt MCP wants to read your chats on this Mac."));
+  assert.ok(scripts[0].includes("Enter your Salt password."));
+  assert.ok(scripts[0].includes("with hidden answer"));
+  assert.equal(exec.calls.length, 0, "no security / Keychain call exists any more");
 });
 
-test("a password with quotes, a newline and shell syntax round-trips through the b64 form", async () => {
-  const stored = `salt-mcp-b64:${Buffer.from(SECRET, "utf8").toString("base64")}`;
-  const { execFile } = fakeExec(() => ({ stdout: `${stored}\n` }));
-  const secrets = createSecrets({ execFile, env: {}, platform: "darwin" });
-  assert.equal(await secrets.readPassword("me@example.test"), SECRET);
+test("the separate lock password has its own dialog", async () => {
+  const { runScript, scripts } = fakeScript(() => "lock secret\n");
+  assert.equal(await createSecrets({ runScript, env: {}, platform: "darwin" }).readPassword("vault"), "lock secret");
+  assert.ok(scripts[0].includes("separate Salt lock password"));
+  assert.ok(scripts[0].includes("with hidden answer"));
 });
 
-test("a hand-added Keychain item without the prefix is used as typed", async () => {
-  const { execFile } = fakeExec(() => ({ stdout: "plain pass\n" }));
-  assert.equal(await createSecrets({ execFile, env: {}, platform: "darwin" }).readPassword("e@x.test"), "plain pass");
+test("Cancel, closing the dialog, or an empty answer is a refusal in one plain line", async () => {
+  for (const handler of [() => { throw new Error("User canceled. (-128)"); }, () => "\n", () => ""]) {
+    const secrets = createSecrets({ runScript: fakeScript(handler).runScript, env: {}, platform: "darwin" });
+    await assert.rejects(secrets.readPassword("login"), (err) => err instanceof SecretsError && err.declined === true && err.message === DECLINED);
+  }
+  assert.equal(DECLINED, "You chose not to unlock your Salt chats.");
 });
 
-test("a missing Keychain item is one plain sentence with no program output in it", async () => {
-  const { execFile } = fakeExec(() => {
-    throw new Error("security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.");
-  });
-  await assert.rejects(createSecrets({ execFile, env: {}, platform: "darwin" }).readPassword("e@x.test"), (err) => {
-    assert.ok(err instanceof SecretsError);
-    assert.match(err.message, /No password is saved in the Keychain for salt-mcp-me\./);
-    assert.ok(!/SecKeychain/.test(err.message));
-    return true;
-  });
+test("a password with quotes, backslashes and newlines survives untouched (it only travels on the dialog's stdout)", async () => {
+  const tricky = "p4ss \"q\" 'x' \\ $(touch pwned) é\nline2";
+  const secrets = createSecrets({ runScript: fakeScript(() => `${tricky}\n`).runScript, env: {}, platform: "darwin" });
+  assert.equal(await secrets.readPassword("login"), tricky);
 });
 
-test("SALT_ME_PASSWORD_CMD wins over the Keychain and works off macOS", async () => {
-  const { execFile, calls } = fakeExec(() => ({ stdout: "from-linux-secret-tool\n" }));
+test("off macOS the dialog is unavailable and SALT_ME_PASSWORD_CMD is the way", async () => {
+  await assert.rejects(createSecrets({ env: {}, platform: "linux" }).readPassword("login"), /SALT_ME_PASSWORD_CMD/);
+  const { execFile, calls } = fakeExec(() => ({ stdout: "from-secret-tool\n" }));
   const secrets = createSecrets({ execFile, env: { SALT_ME_PASSWORD_CMD: "secret-tool lookup service salt" }, platform: "linux" });
-  assert.equal(await secrets.readPassword("e@x.test"), "from-linux-secret-tool");
+  assert.equal(await secrets.readPassword("login"), "from-secret-tool");
   assert.deepEqual(calls[0].args, ["-c", "secret-tool lookup service salt"]);
-  assert.equal(calls.length, 1);
+});
+
+test("a configured command also wins on macOS, and the vault password has its own command", async () => {
+  const exec = fakeExec((file, args) => ({ stdout: args[1] === "vault-cmd" ? "vault-pass\n" : "login-pass\n" }));
+  const { runScript, scripts } = fakeScript(() => "never");
+  const secrets = createSecrets({ runScript, execFile: exec.execFile, env: { SALT_ME_PASSWORD_CMD: "login-cmd", SALT_ME_VAULT_PASSWORD_CMD: "vault-cmd" }, platform: "darwin" });
+  assert.equal(await secrets.readPassword("vault"), "vault-pass");
+  assert.equal(await secrets.readPassword("login"), "login-pass");
+  assert.equal(scripts.length, 0);
 });
 
 test("an empty or failing password command is an error that carries nothing", async () => {
-  const empty = createSecrets({ execFile: fakeExec(() => ({ stdout: "\n" })).execFile, env: { SALT_ME_PASSWORD_CMD: "x" }, platform: "linux" });
-  await assert.rejects(empty.readPassword("e@x.test"), /printed nothing/);
-  const failing = createSecrets({ execFile: fakeExec(() => { throw new Error("boom: secret was hunter2"); }).execFile, env: { SALT_ME_PASSWORD_CMD: "x" }, platform: "linux" });
-  await assert.rejects(failing.readPassword("e@x.test"), (err) => !/hunter2/.test(err.message));
+  const mk = (handler) => createSecrets({ execFile: fakeExec(handler).execFile, env: { SALT_ME_PASSWORD_CMD: "x" }, platform: "linux" });
+  await assert.rejects(mk(() => ({ stdout: "\n" })).readPassword("login"), /printed nothing/);
+  await assert.rejects(mk(() => { throw new Error("boom: secret was hunter2"); }).readPassword("login"), (err) => !/hunter2/.test(err.message));
 });
 
-test("the vault password has its own command", async () => {
-  const { execFile, calls } = fakeExec((file, args) => ({ stdout: args[1] === "vault-cmd" ? "vault-pass\n" : "login-pass\n" }));
-  const secrets = createSecrets({ execFile, env: { SALT_ME_PASSWORD_CMD: "login-cmd", SALT_ME_VAULT_PASSWORD_CMD: "vault-cmd" }, platform: "linux" });
-  assert.equal(await secrets.readPassword("e@x.test", KEYCHAIN_VAULT_SERVICE), "vault-pass");
-  assert.equal(await secrets.readPassword("e@x.test"), "login-pass");
-  assert.equal(calls.length, 2);
+test("the email is SALT_ME_EMAIL, else asked in a visible dialog", async () => {
+  assert.equal(await createSecrets({ env: { SALT_ME_EMAIL: " me@example.test " }, platform: "darwin" }).readEmail(), "me@example.test");
+  const { runScript, scripts } = fakeScript(() => "typed@example.test\n");
+  assert.equal(await createSecrets({ runScript, env: {}, platform: "darwin" }).readEmail(), "typed@example.test");
+  assert.ok(!scripts[0].includes("hidden answer"));
+  await assert.rejects(createSecrets({ env: {}, platform: "linux" }).readEmail(), /SALT_ME_EMAIL/);
 });
 
-test("findEmail: SALT_ME_EMAIL first, else the account of the saved item", async () => {
-  assert.equal(await createSecrets({ env: { SALT_ME_EMAIL: " me@example.test " }, platform: "darwin" }).findEmail(), "me@example.test");
-  const { execFile, calls } = fakeExec(() => ({ stdout: 'attributes:\n    "acct"<blob>="saved@example.test"\n    "svce"<blob>="salt-mcp-me"\n' }));
-  assert.equal(await createSecrets({ execFile, env: {}, platform: "darwin" }).findEmail(), "saved@example.test");
-  assert.deepEqual(calls[0].args, ["find-generic-password", "-s", "salt-mcp-me"]);
-  const none = createSecrets({ execFile: fakeExec(() => { throw new Error("nope"); }).execFile, env: {}, platform: "darwin" });
-  await assert.rejects(none.findEmail(), /--as-me-setup/);
+test("askDialog needs macOS", async () => {
+  await assert.rejects(askDialog("x", { platform: "linux" }), /needs macOS/);
 });
 
-test("storePassword feeds `security -i` on stdin, hex-encoded: the password is in no argument and no readable text", async () => {
-  const runs = [];
-  const secrets = createSecrets({ env: {}, platform: "darwin", runWithInput: async (file, args, input) => runs.push({ file, args, input }) });
-  await secrets.storePassword(KEYCHAIN_SERVICE, "me@example.test", SECRET);
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].file, "security");
-  assert.deepEqual(runs[0].args, ["-i"]);
-  const line = runs[0].input;
-  assert.match(line, /^add-generic-password -U -s salt-mcp-me -a me@example\.test -X [0-9a-f]+\n$/);
-  assert.ok(!line.includes("p4ss"), "no readable password in the command");
-  const hex = /-X ([0-9a-f]+)/.exec(line)[1];
-  const decoded = Buffer.from(hex, "hex").toString("utf8");
-  assert.ok(decoded.startsWith("salt-mcp-b64:"));
-  assert.equal(Buffer.from(decoded.slice("salt-mcp-b64:".length), "base64").toString("utf8"), SECRET);
-});
-
-test("storePassword refuses an email it could not quote safely, and reports a refused save plainly", async () => {
-  const secrets = createSecrets({ env: {}, platform: "darwin", runWithInput: async () => { throw new Error("exit 2"); } });
-  await assert.rejects(secrets.storePassword(KEYCHAIN_SERVICE, 'a b"c@x.test', "x"), /characters the setup cannot save/);
-  await assert.rejects(secrets.storePassword(KEYCHAIN_SERVICE, "me@example.test", "x"), /Keychain refused/);
-  await assert.rejects(createSecrets({ env: {}, platform: "linux" }).storePassword(KEYCHAIN_SERVICE, "me@example.test", "x"), /needs macOS/);
-});
-
-test("askHiddenPassword uses a hidden-answer dialog and passes the prompt as an argument", async () => {
-  const { execFile, calls } = fakeExec(() => ({ stdout: "typed secret\n" }));
-  assert.equal(await askHiddenPassword("Salt password for me@example.test", { execFile, platform: "darwin" }), "typed secret");
-  const { args } = calls[0];
-  assert.equal(args.at(-1), "Salt password for me@example.test");
-  assert.ok(args.join(" ").includes("with hidden answer"));
-  assert.ok(!args.slice(0, -1).some((a) => a.includes("me@example.test")), "the prompt is an argument, not spliced into the script");
-});
-
-test("askHiddenPassword: cancel and empty answers are errors", async () => {
-  await assert.rejects(askHiddenPassword("x", { execFile: fakeExec(() => { throw new Error("User canceled. (-128)"); }).execFile, platform: "darwin" }), /cancelled/);
-  await assert.rejects(askHiddenPassword("x", { execFile: fakeExec(() => ({ stdout: "\n" })).execFile, platform: "darwin" }), /No password/);
-  await assert.rejects(askHiddenPassword("x", { platform: "linux" }), /needs macOS/);
-});
-
-test("the send dialog shows the chat and the full text as arguments; only 'Send' means yes", async () => {
-  const text = 'Meet at 5"; do shell script "rm -rf ~"';
-  const sent = fakeExec(() => ({ stdout: "Send\n" }));
-  assert.equal(await createSendConfirmation({ execFile: sent.execFile, platform: "darwin" })({ chatName: "Launch crew", text }), true);
-  const { args } = sent.calls[0];
-  assert.equal(sent.calls[0].file, "osascript");
-  assert.ok(args.at(-1).includes("Launch crew") && args.at(-1).includes(text), "chat name and full text reach the dialog");
-  assert.ok(!args.slice(0, -2).some((a) => a.includes("rm -rf")), "text is never part of the script");
-  assert.ok(args.join(" ").includes("Don't send") && args.join(" ").includes('"Send"'));
-
-  for (const outcome of [{ stdout: "Don't send\n" }, { stdout: "" }, { stdout: "send\n" }]) {
-    assert.equal(await createSendConfirmation({ execFile: fakeExec(() => outcome).execFile, platform: "darwin" })({ chatName: "c", text: "t" }), false);
+test("appleScriptString escapes exactly what a string literal needs, and cannot be broken out of", () => {
+  assert.equal(appleScriptString('a"b\\c\nd\te'), '"a\\"b\\\\c\\nd\\te"');
+  assert.equal(appleScriptString("a\r\nb"), '"a\\nb"');
+  assert.equal(appleScriptString("x‮y​z\u0007"), '"x?y?z?"', "hidden characters never reach the dialog");
+  if (process.platform === "darwin") {
+    for (const t of ['plain', 'q"uote \\ back', 'line1\nline2\ttab', 'end"\nset x to 1\nreturn "pwn', "Don't $(id) é"]) {
+      const r = spawnSync("osascript", ["-"], { input: `return ${appleScriptString(t)}\n` });
+      assert.equal(r.stdout.toString().replace(/\n$/, ""), t, "real osascript reads the literal back unchanged");
+    }
   }
-  assert.equal(await createSendConfirmation({ execFile: fakeExec(() => { throw new Error("User canceled. (-128)"); }).execFile, platform: "darwin" })({ chatName: "c", text: "t" }), false);
-  assert.equal(await createSendConfirmation({ platform: "linux" })({ chatName: "c", text: "t" }), false, "no dialog available means no send");
+});
+
+test("scripts that go to osascript compile (macOS only)", { skip: process.platform !== "darwin" }, async () => {
+  const { runScript, scripts } = fakeScript(() => "Send\n");
+  await createSendConfirmation({ runScript, platform: "darwin" })({ chatName: 'A "chat"', members: [{ name: "Ada", handle: "@ada", type: "person" }], memberCount: 2, open: false, text: "hi\nthere" });
+  await createSecrets({ runScript, env: {}, platform: "darwin" }).readPassword("login");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const dir = mkdtempSync(`${tmpdir()}/saltme-`);
+  try {
+    for (const [i, script] of scripts.entries()) {
+      writeFileSync(`${dir}/s${i}.applescript`, script);
+      const c = spawnSync("osacompile", ["-o", `${dir}/s${i}.scpt`, `${dir}/s${i}.applescript`]);
+      assert.equal(c.status, 0, `script ${i} compiles: ${c.stderr}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const INFO = {
+  chatName: "Launch crew",
+  members: [{ name: "Ada Lovelace", handle: "@ada", type: "person" }, { name: "Helper Bot", handle: "@helperbot", type: "agent" }],
+  memberCount: 3,
+  open: false,
+  text: "Meet at 5",
+};
+
+test("the send dialog shows verified facts: the name, the members labelled person or agent, the count, the full text", () => {
+  const text = buildSendDialogText(INFO);
+  assert.match(text, /^Encrypted for everyone in this chat\.\nTo: Launch crew\n3 members: Ada Lovelace \(@ada, person\), Helper Bot \(@helperbot, agent\)\n\nMeet at 5$/);
+});
+
+test("an open room gets a loud line, in the text and in the title", async () => {
+  assert.match(buildSendDialogText({ ...INFO, open: true }), /^THIS ROOM IS OPEN: anyone can read this message\./);
+  const { runScript, scripts } = fakeScript(() => "Don't send\n");
+  await createSendConfirmation({ runScript, platform: "darwin" })({ ...INFO, open: true });
+  assert.match(scripts[0], /to an OPEN room\?/);
+});
+
+test("a chat name chosen by a stranger cannot reshape the dialog: control, direction and zero-width characters go", () => {
+  const evil = "Mom\n\nTo: Bank‮ ​safe\u0000";
+  assert.equal(cleanName(evil), "Mom To: Bank safe");
+  assert.ok(!buildSendDialogText({ ...INFO, chatName: evil }).split("\n").slice(0, 2).join("|").includes("‮"));
+  assert.equal(buildSendDialogText({ ...INFO, chatName: evil }).split("\n")[1], "To: Mom To: Bank safe");
+  assert.equal(cleanName("x".repeat(200)).length, 60);
+});
+
+test("more than eight members are summarised", () => {
+  const members = Array.from({ length: 11 }, (_, i) => ({ name: `P${i}`, handle: `@p${i}`, type: "person" }));
+  assert.match(buildSendDialogText({ ...INFO, members, memberCount: 12 }), /12 members: .* and 3 more\n/);
+});
+
+test("the dialog gets the text through stdin script, never argv; only 'Send' means yes", async () => {
+  const sent = fakeScript(() => "Send\n");
+  assert.equal(await createSendConfirmation({ runScript: sent.runScript, platform: "darwin" })(INFO), true);
+  assert.ok(sent.scripts[0].includes("Meet at 5") && sent.scripts[0].includes("Launch crew"));
+  assert.ok(sent.scripts[0].includes("Don't send") && sent.scripts[0].includes("default button \"Don't send\""));
+
+  for (const outcome of ["Don't send\n", "", "send\n", "Send it\n"]) {
+    assert.equal(await createSendConfirmation({ runScript: fakeScript(() => outcome).runScript, platform: "darwin" })(INFO), false, JSON.stringify(outcome));
+  }
+  assert.equal(await createSendConfirmation({ runScript: fakeScript(() => { throw new Error("User canceled. (-128)"); }).runScript, platform: "darwin" })(INFO), false);
+  assert.equal(await createSendConfirmation({ platform: "linux" })(INFO), false, "no dialog available means no send");
+});
+
+test("injection through the message text cannot escape the script literal", async () => {
+  const { runScript, scripts } = fakeScript(() => "Don't send\n");
+  const text = 'ok"\nset result to "Send"\nreturn "Send';
+  await createSendConfirmation({ runScript, platform: "darwin" })({ ...INFO, text });
+  assert.ok(scripts[0].includes(appleScriptString(buildSendDialogText({ ...INFO, text }))));
+  assert.ok(!scripts[0].includes('\nset result to "Send"\n'), "the newline is escaped, not live script");
 });

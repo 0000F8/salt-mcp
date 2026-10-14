@@ -83,7 +83,7 @@ const json = (body, status = 200, headers = {}) => new Response(JSON.stringify(b
  *   password?: string, vaultPassword?: string, signInStatus?: number, messageCount?: number,
  * }} options
  */
-export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase = "upper", password = PASSWORD, vaultPassword = VAULT_PASSWORD, signInStatus, messageCount = 25 } = {}) {
+export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase = "upper", password = PASSWORD, vaultPassword = VAULT_PASSWORD, signInStatus, messageCount = 25, authIterations = TEST_ITERATIONS } = {}) {
   const openpgp = await loadOpenpgp();
   const keys = await pgpKeys();
   const dek = randomBytes(32);
@@ -188,7 +188,7 @@ export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase
 
   const requests = [];
   const posted = [];
-  const state = { signIns: 0, expireNextRequest: false };
+  const state = { signIns: 0, signOuts: 0, expireNextRequest: false };
 
   const sessionFor = (chat) => ({ ...chat, joined_at: "2026-01-01T00:00:00Z", request_state: chat.request_state ?? null });
   const sorted = (chatId) => serverMessages.get(chatId) ?? [];
@@ -203,8 +203,14 @@ export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase
       state.signIns++;
       const body = JSON.parse(init.body);
       if (signInStatus) return json({ status: signInStatus }, signInStatus);
-      if (body.user.email !== EMAIL || body.user.password !== expectedAuthString(password)) return json({ status: 401, message: "Credentials invalid" }, 401);
+      if (body.user.email !== EMAIL || body.user.password !== expectedAuthString(password, authIterations)) return json({ status: 401, message: "Credentials invalid" }, 401);
       return json({ id: ME_ID, username: "owner", display_name: "Owner", email: EMAIL }, 200, { Authorization: "Bearer test.jwt.token" });
+    }
+
+    if (method === "DELETE" && path === "/auth/sign_out") {
+      if (init.headers?.Authorization !== "Bearer test.jwt.token") return json({ error: "unauthorized" }, 401);
+      state.signOuts++;
+      return new Response(null, { status: 204 });
     }
 
     if (init.headers?.Authorization !== "Bearer test.jwt.token" || state.expireNextRequest) {
@@ -266,11 +272,11 @@ export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase
     host: HOST,
     email: EMAIL,
     fetchImpl,
-    signInIterations: TEST_ITERATIONS,
-    readPassword: async (service) => {
-      secretCalls.push(service);
-      if (service === "salt-mcp-me-vault") {
-        if (lockMode === "login") throw new Error("not saved");
+    signInIterations: authIterations,
+    readPassword: async (kind) => {
+      secretCalls.push(kind);
+      if (kind === "vault") {
+        if (lockMode === "login") throw new Error("no second password");
         return vaultPassword;
       }
       return password;

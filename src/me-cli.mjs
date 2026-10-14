@@ -1,10 +1,9 @@
-// Entry points of `salt-mcp --as-me` and `salt-mcp --as-me-setup <email>`.
+// Entry point of `salt-mcp --as-me`.
 //
 //   --as-me          a stdio MCP server on the owner's own computer. It signs in to Salt as the owner, unlocks the
-//                    messages key LOCALLY with the password saved in the macOS Keychain, and lets the owner's AI read
-//                    their end-to-end encrypted chats. Read-only unless --allow-send.
-//   --as-me-setup    asks for the password in a hidden native dialog, checks it by signing in and unlocking once, and
-//                    only then saves it to the Keychain.
+//                    messages key LOCALLY with the password the owner types into a hidden dialog the first time a tool
+//                    needs it, and lets the owner's AI read their end-to-end encrypted chats. Nothing is saved: not the
+//                    password, not the key. Read-only unless --allow-send. On exit it signs out, revoking its session.
 //
 // stdout is the MCP channel: everything here that talks to a person goes to stderr.
 
@@ -15,14 +14,7 @@ import { readFileSync } from "node:fs";
 import { toolResult } from "./tool-result.mjs";
 import { createMeSession, DEFAULT_HOST } from "./me-session.mjs";
 import { createMeHandlers, McpContent } from "./me-tools.mjs";
-import {
-  createSecrets,
-  createSendConfirmation,
-  askHiddenPassword,
-  SecretsError,
-  KEYCHAIN_SERVICE,
-  KEYCHAIN_VAULT_SERVICE,
-} from "./me-secrets.mjs";
+import { createSecrets, createSendConfirmation } from "./me-secrets.mjs";
 
 const { version: PACKAGE_VERSION } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -34,18 +26,20 @@ const INSTRUCTIONS =
 
 export class AsMeStartError extends Error {}
 
-/** Refuses to run where there is no Keychain and no configured password command. Pure, so a test can drive it. */
+/** Refuses to run where there is no password dialog and no configured password command. Pure, so a test can drive it. */
 export function checkPlatform({ platform = process.platform, env = process.env } = {}) {
   if (platform !== "darwin" && !env.SALT_ME_PASSWORD_CMD) {
     throw new AsMeStartError(
-      "salt-mcp --as-me keeps your password in the macOS Keychain, so it runs on a Mac. " +
+      "salt-mcp --as-me asks for your password in a macOS dialog, so it runs on a Mac. " +
         "On another system, set SALT_ME_PASSWORD_CMD to a command that prints your Salt password (for example a secret-tool lookup)."
     );
   }
 }
 
-// The sign-in string and the session token go to this host: only over https, or to a server on this very computer.
-function assertSafeHost(host) {
+// The sign-in string and the session token go to this host: only over https, or to a server on this very computer,
+// and only with certificate checking left as Node has it (a switched-off check or an extra trusted CA in the
+// environment would let someone in the middle read both).
+export function assertSafeHost(host, env = process.env) {
   let url;
   try {
     url = new URL(host);
@@ -54,6 +48,9 @@ function assertSafeHost(host) {
   }
   const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (url.protocol !== "https:" && !(local && url.protocol === "http:")) throw new AsMeStartError("HOST must be an https address.");
+  if (!local && (env.NODE_TLS_REJECT_UNAUTHORIZED === "0" || env.NODE_EXTRA_CA_CERTS)) {
+    throw new AsMeStartError("Refusing to start: NODE_TLS_REJECT_UNAUTHORIZED=0 or NODE_EXTRA_CA_CERTS is set, which weakens the check on Salt's certificate. Unset it for this server.");
+  }
 }
 
 /** The MCP server around the --as-me handlers; exported so a test can run it over an in-memory transport. */
@@ -73,52 +70,33 @@ export function buildMeServer(handlers) {
   return server;
 }
 
-export async function runAsMe({ argv = process.argv.slice(2), env = process.env, platform = process.platform } = {}) {
+export async function runAsMe({ argv = process.argv.slice(2), env = process.env, platform = process.platform, secrets, runScript } = {}) {
   checkPlatform({ platform, env });
   const allowSend = argv.includes("--allow-send");
-  const secrets = createSecrets({ env, platform });
-  let email;
-  try {
-    email = await secrets.findEmail();
-  } catch (err) {
-    throw new AsMeStartError(err instanceof SecretsError ? err.message : "Couldn't find the Salt account to use.");
-  }
+  secrets ??= createSecrets({ env, platform, ...(runScript ? { runScript } : {}) });
   const host = (env.HOST || DEFAULT_HOST).replace(/\/$/, "");
-  assertSafeHost(host);
-  const session = createMeSession({ host, email, readPassword: (service) => secrets.readPassword(email, service) });
-  const handlers = createMeHandlers({ session, allowSend, confirmSend: createSendConfirmation({ platform }), host });
-  const server = buildMeServer(handlers);
-  await server.connect(new StdioServerTransport());
-  log(`as-me ready for ${email} (${host}); ${handlers.toolCount} tools; ${allowSend ? "SENDING ENABLED (each message needs your OK in a dialog)" : "read-only"}; unlocks on first use`);
-}
-
-/**
- * `salt-mcp --as-me-setup <email>`. Returns the line to print. The password goes from the dialog into the sign-in and
- * then the Keychain; it is never printed. A password that does not sign in and unlock is not saved.
- */
-export async function runAsMeSetup(email, { env = process.env, platform = process.platform, secrets, ask = askHiddenPassword, fetchImpl, signInIterations } = {}) {
-  if (platform !== "darwin") throw new AsMeStartError("Setup saves your password in the macOS Keychain, so it runs on a Mac.");
-  if (!email || !/^[^\s@]+@[^\s@]+$/.test(email)) throw new AsMeStartError("Usage: salt-mcp --as-me-setup <your Salt email>");
-  secrets ??= createSecrets({ env, platform });
-  const host = (env.HOST || DEFAULT_HOST).replace(/\/$/, "");
-  assertSafeHost(host);
-
-  const login = await ask(`Salt password for ${email}`, { platform });
-  let vault = null;
+  assertSafeHost(host, env);
   const session = createMeSession({
     host,
-    email,
-    fetchImpl,
-    signInIterations,
-    readPassword: async (service) => {
-      if (service === KEYCHAIN_SERVICE) return login;
-      vault ??= await ask(`Your Salt lock password (the separate one) for ${email}`, { platform });
-      return vault;
-    },
+    email: env.SALT_ME_EMAIL?.trim() || null,
+    readEmail: () => secrets.readEmail(),
+    readPassword: (kind) => secrets.readPassword(kind),
   });
-  await session.ensureUnlocked();
+  const handlers = createMeHandlers({ session, allowSend, confirmSend: createSendConfirmation({ platform, ...(runScript ? { runScript } : {}) }), host });
+  const server = buildMeServer(handlers);
+  await server.connect(new StdioServerTransport());
 
-  await secrets.storePassword(KEYCHAIN_SERVICE, email, login);
-  if (vault !== null && vault !== login) await secrets.storePassword(KEYCHAIN_VAULT_SERVICE, email, vault);
-  return "Saved. Salt MCP can read your chats on this Mac.";
+  // The session is revoked on the way out, so restarting the server does not leave live 30-day tokens behind.
+  let leaving = false;
+  const leave = () => {
+    if (leaving) return;
+    leaving = true;
+    session.signOut().finally(() => process.exit(0));
+  };
+  process.stdin.once("end", leave);
+  process.stdin.once("close", leave);
+  process.once("SIGINT", leave);
+  process.once("SIGTERM", leave);
+
+  log(`as-me ready (${host}); ${handlers.toolCount} tools; ${allowSend ? "SENDING ENABLED (each message needs your OK in a dialog)" : "read-only"}; asks for your password on first use, saves nothing`);
 }
