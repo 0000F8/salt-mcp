@@ -701,7 +701,7 @@ If it cannot unlock, the AI is told one sentence: "Couldn't unlock: check the
 password saved for Salt MCP (run salt-mcp --as-me-setup)".
 
 **Settings** (environment variables, all optional): `SALT_ME_EMAIL` (otherwise
-the account saved by setup), `HOST` (default `https://api.saltapp.ai`).
+the account saved by setup), `HOST` (default `https://saltapp.ai`, the address the Salt website itself uses).
 
 **Not on a Mac?** `--as-me` refuses to start without the Keychain unless you set
 `SALT_ME_PASSWORD_CMD` to a command that prints your Salt password, for example
