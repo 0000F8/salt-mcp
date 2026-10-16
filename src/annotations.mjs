@@ -202,6 +202,21 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: true, // revoking an already-revoked share leaves the same state
     openWorldHint: true,
   },
+  // salt-agent-sdk 0.22.0 (Show Me, help.ts): the same gap again, two tools ahead.
+  ask_for_help: {
+    title: "Ask a Person for Help",
+    readOnlyHint: false,
+    destructiveHint: false, // posts one question into a 1:1 and rings the person's phone; deletes and moves nothing
+    idempotentHint: false, // each call posts another question (asking again withdraws the open request)
+    openWorldHint: true, // the person is notified live
+  },
+  close_help_request: {
+    title: "Close a Help Request",
+    readOnlyHint: false,
+    destructiveHint: false, // ends your own open ask and stops the screen being sent; asking again opens a fresh one
+    idempotentHint: true, // closing an already-closed request leaves the same state
+    openWorldHint: true,
+  },
 };
 
 /**
