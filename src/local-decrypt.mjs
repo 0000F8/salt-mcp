@@ -19,27 +19,38 @@ export function loadOpenpgp() {
 }
 
 /**
- * @returns {(armoredMessage: string) => Promise<string>} Throws per message if it can't be opened; the key is unlocked once and reused.
+ * `privateKey` is one armored key or an array of them (active first, then retired generations). A key that cannot be
+ * read or unlocked is skipped; with none usable the message throws like any unopenable message.
+ * @returns {(armoredMessage: string) => Promise<string>} Throws per message if it can't be opened; keys are unlocked once and reused.
  */
 export function createDecryptor({ privateKey, passphrase }) {
-  let keyPromise;
-  const unlockedKey = async (openpgp) => {
-    if (!keyPromise) {
-      keyPromise = (async () => {
-        const key = await openpgp.readPrivateKey({ armoredKey: privateKey });
-        return key.isDecrypted() ? key : openpgp.decryptKey({ privateKey: key, passphrase: passphrase ?? "" });
+  let keysPromise;
+  const unlockedKeys = async (openpgp) => {
+    if (!keysPromise) {
+      keysPromise = (async () => {
+        const armoredKeys = Array.isArray(privateKey) ? privateKey : [privateKey];
+        const settled = await Promise.allSettled(
+          armoredKeys.map(async (armoredKey) => {
+            const key = await openpgp.readPrivateKey({ armoredKey });
+            return key.isDecrypted() ? key : openpgp.decryptKey({ privateKey: key, passphrase: passphrase ?? "" });
+          })
+        );
+        const keys = settled.filter((r) => r.status === "fulfilled").map((r) => r.value);
+        // Single-key behaviour kept: when nothing opens, surface the first error and retry next time.
+        if (!keys.length) throw settled[0]?.reason ?? new Error("No usable decryption key");
+        return keys;
       })();
       // A failed unlock must be retried, not cached forever.
-      keyPromise.catch(() => { keyPromise = undefined; });
+      keysPromise.catch(() => { keysPromise = undefined; });
     }
-    return keyPromise;
+    return keysPromise;
   };
   return async function decryptMessage(armoredMessage) {
     const openpgp = await loadOpenpgp();
-    const key = await unlockedKey(openpgp);
+    const keys = await unlockedKeys(openpgp);
     const { data } = await openpgp.decrypt({
       message: await openpgp.readMessage({ armoredMessage }),
-      decryptionKeys: [key],
+      decryptionKeys: keys,
     });
     return String(data);
   };

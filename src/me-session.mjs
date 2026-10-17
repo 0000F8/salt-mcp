@@ -25,6 +25,7 @@ import {
   unwrapMessagesDek,
   readArmoredPrivateKey,
   openPrivateKey,
+  openRetiredPrivateKeys,
   createMessageDecryptor,
   MAX_ATTACHMENT_BYTES,
 } from "./me-crypto.mjs";
@@ -223,6 +224,7 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     const userKeys = await getJson("/api/v1/userkeys");
     const userKey = Array.isArray(userKeys) ? userKeys[0] : userKeys;
     let armored;
+    let retiredKeys = [];
     if (userKey?.encrypted_private_key) {
       const vault = await getJson("/api/v1/vault");
       lockMode = vault?.lock_mode ?? null;
@@ -236,12 +238,14 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
         dek = await unwrapMessagesDek({ vault, vaultPassword: await readPassword("vault") });
       }
       armored = await readArmoredPrivateKey({ userKey, dek });
+      retiredKeys = await openRetiredPrivateKeys({ retired: userKey.retired, dek });
     } else {
       lockMode = "legacy";
       armored = await readArmoredPrivateKey({ userKey });
     }
     privateKey = await openPrivateKey(armored);
-    decryptText = createMessageDecryptor(privateKey);
+    // Active key first, then retired generations. Sending and encrypting still use the active key only.
+    decryptText = createMessageDecryptor(retiredKeys.length ? [privateKey, ...retiredKeys] : privateKey);
   }
 
   /** Signs in and unlocks on first use. Resolves once; a failure is remembered for a minute. */

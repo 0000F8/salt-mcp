@@ -119,12 +119,30 @@ export async function openPrivateKey(armoredKey) {
   return key.isDecrypted() ? key : openpgp.decryptKey({ privateKey: key, passphrase: "salt" });
 }
 
+/**
+ * The retired generations of the owner's chat key (`retired` from GET /userkeys; absent means none), opened with the
+ * same DEK. A row that cannot be opened (a DEK minted after "start fresh", a damaged row) is skipped: that history
+ * simply stays "[Encrypted]". Never throws.
+ */
+export async function openRetiredPrivateKeys({ retired, dek }) {
+  const keys = [];
+  for (const row of Array.isArray(retired) ? retired : []) {
+    try {
+      keys.push(await openPrivateKey(await readArmoredPrivateKey({ userKey: row, dek })));
+    } catch {
+      // skipped on purpose
+    }
+  }
+  return keys;
+}
+
 export const ENCRYPTED_PLACEHOLDER = "[Encrypted]";
 const PGP_MESSAGE_RE = /^-----BEGIN PGP MESSAGE-----/;
 export const isCiphertext = (text) => PGP_MESSAGE_RE.test(text || "");
 
 /**
- * A decryptor over the unlocked key. A body that is not PGP armor passes through untouched (an open room); a body
+ * A decryptor over the unlocked key, or a keyring: `privateKey` is one openpgp key or an array (active first, then
+ * retired). openpgp matches the message's recipient key ids itself. A body that is not PGP armor passes through untouched (an open room); a body
  * that cannot be opened is "[Encrypted]" -- normal for anything sent before the owner joined the chat.
  */
 export function createMessageDecryptor(privateKey) {
@@ -134,7 +152,7 @@ export function createMessageDecryptor(privateKey) {
       const openpgp = await loadOpenpgp();
       const { data } = await openpgp.decrypt({
         message: await openpgp.readMessage({ armoredMessage: body }),
-        decryptionKeys: privateKey,
+        decryptionKeys: privateKey, // one key or the whole keyring
       });
       return String(data);
     } catch {
