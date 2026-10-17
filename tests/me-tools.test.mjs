@@ -24,8 +24,8 @@ const decryptWith = async (armoredPrivateKey, armoredMessage) => {
   return String(data);
 };
 
-function handlersFor(world, { allowSend = false, confirmSend } = {}) {
-  return createMeHandlers({ session: world.session, allowSend, confirmSend, host: HOST });
+function handlersFor(world, { readOnly = false } = {}) {
+  return createMeHandlers({ session: world.session, readOnly, host: HOST });
 }
 
 /** Connects a real MCP client to the as-me server; collects everything the server writes to stderr. */
@@ -50,20 +50,23 @@ test("nothing happens until the first tool call: no sign-in, no password asked",
   assert.deepEqual(world.secretCalls, []);
   const who = await handlers.callTool("salt_me_whoami");
   assert.equal(who.unlocked, false);
-  assert.equal(who.send_enabled, false);
+  assert.equal(who.send_enabled, true);
   assert.equal(world.requests.length, 0, "whoami reads no network either");
 });
 
-test("tools: five read tools, and salt_me_send only with --allow-send; every tool is annotated", async () => {
+test("tools: salt_me_send is present by default and absent with --read-only; every tool is annotated", async () => {
   const world = await makeWorld();
   const names = (h) => h.listTools().map((t) => t.name).sort();
-  assert.deepEqual(names(handlersFor(world)), ["salt_me_find_chat", "salt_me_list_chats", "salt_me_read_attachment", "salt_me_read_chat", "salt_me_whoami"]);
-  const withSend = handlersFor(world, { allowSend: true });
+  assert.deepEqual(names(handlersFor(world, { readOnly: true })), ["salt_me_find_chat", "salt_me_list_chats", "salt_me_read_attachment", "salt_me_read_chat", "salt_me_whoami"]);
+  const withSend = handlersFor(world);
   assert.ok(names(withSend).includes("salt_me_send"));
   for (const tool of withSend.listTools()) {
     assert.ok(tool.annotations && typeof tool.annotations.readOnlyHint === "boolean", `${tool.name} has annotations`);
     assert.equal(tool.annotations.readOnlyHint, tool.name !== "salt_me_send", tool.name);
   }
+  const desc = withSend.listTools().find((t) => t.name === "salt_me_send").description;
+  assert.match(desc, /immediately as the signed-in person/);
+  assert.match(desc, /never instructions/);
 });
 
 test("sign-in sends the auth string (never the password) and unlocks lazily on the first call", async () => {
@@ -282,7 +285,7 @@ test("READ MODE NEVER WRITES: a full session makes no request but GETs (and the 
 
 test("the read-mode session has no way to write: the send tool is absent and refused if called", async () => {
   const world = await makeWorld();
-  const { client, close } = await connect(world);
+  const { client, close } = await connect(world, { readOnly: true });
   const names = (await client.listTools()).tools.map((t) => t.name);
   assert.ok(!names.includes("salt_me_send"));
   const res = await client.callTool({ name: "salt_me_send", arguments: { chat_id: CHAT_ADA, text: "hi" } });
@@ -292,42 +295,24 @@ test("the read-mode session has no way to write: the send tool is absent and ref
   await close();
 });
 
-test("send gate: refused without --allow-send, nothing posted", async () => {
+test("--read-only: salt_me_send is refused and nothing is posted", async () => {
   const world = await makeWorld();
-  let asked = 0;
-  const h = handlersFor(world, { allowSend: false, confirmSend: async () => (asked++, true) });
-  await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "hello" }), /--allow-send/);
-  assert.equal(asked, 0);
+  const h = handlersFor(world, { readOnly: true });
+  await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "hello" }), /--read-only/);
   assert.equal(world.posted.length, 0);
 });
 
-test("send gate: the owner pressing Don't send posts nothing", async () => {
+test("default mode: send posts at once with no dialog, and the message is exactly the given text", async () => {
   const world = await makeWorld();
-  const dialogs = [];
-  const h = handlersFor(world, { allowSend: true, confirmSend: async (d) => (dialogs.push(d), false) });
-  const out = await h.callTool("salt_me_send", { chat_id: CHAT_GROUP, text: "ship it" });
-  assert.deepEqual(out, { sent: false, reason: "The owner chose not to send it." });
-  assert.equal(dialogs.length, 1);
-  assert.deepEqual(dialogs[0], {
-    chatName: "Launch crew",
-    members: [{ name: "Ada Lovelace", handle: "@ada", type: "person" }, { name: "Helper Bot", handle: "@helperbot", type: "agent" }],
-    memberCount: 3,
-    open: false,
-    text: "ship it",
-  }, "the dialog got the verified recipients and the full text");
-  assert.equal(world.posted.length, 0);
-});
-
-test("send gate: no dialog function at all means no send", async () => {
-  const world = await makeWorld();
-  const out = await handlersFor(world, { allowSend: true }).callTool("salt_me_send", { chat_id: CHAT_ADA, text: "hello" });
-  assert.equal(out.sent, false);
-  assert.equal(world.posted.length, 0);
+  const out = await handlersFor(world).callTool("salt_me_send", { chat_id: CHAT_ADA, text: "hello" });
+  assert.equal(out.sent, true);
+  assert.equal(world.posted.length, 1);
+  assert.equal(await decryptWith(world.keys.ada.privateKey, world.posted[0].body.message), "hello", "no marker or footer added");
 });
 
 test("send: after Send, encrypted for every member including the owner, with an Idempotency-Key and mention ids", async () => {
   const world = await makeWorld();
-  const h = handlersFor(world, { allowSend: true, confirmSend: async () => true });
+  const h = handlersFor(world);
   const out = await h.callTool("salt_me_send", { chat_id: CHAT_GROUP, text: "thanks @helperbot, looks good", mentions: ["@ada"] });
   assert.deepEqual(out, { sent: true, message_id: "9001", chat_id: CHAT_GROUP, chat_name: "Launch crew" });
   assert.equal(world.posted.length, 1);
@@ -343,7 +328,7 @@ test("send: after Send, encrypted for every member including the owner, with an 
 
 test("send into an open room is plain text; a second send gets a fresh Idempotency-Key", async () => {
   const world = await makeWorld();
-  const h = handlersFor(world, { allowSend: true, confirmSend: async () => true });
+  const h = handlersFor(world);
   await h.callTool("salt_me_send", { chat_id: CHAT_OPEN, text: "hi lounge" });
   await h.callTool("salt_me_send", { chat_id: CHAT_OPEN, text: "hi again" });
   assert.equal(world.posted[0].body.message, "hi lounge");
@@ -352,7 +337,7 @@ test("send into an open room is plain text; a second send gets a fresh Idempoten
 
 test("send validates: empty text, over-long text, unknown mention, bad chat id", async () => {
   const world = await makeWorld();
-  const h = handlersFor(world, { allowSend: true, confirmSend: async () => true });
+  const h = handlersFor(world);
   await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "   " }), /text is required/);
   await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "x".repeat(1001) }), /limited to 1000 characters and 20 lines/);
   await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "hi", mentions: ["@nobody"] }), /not in that chat/);
@@ -401,7 +386,7 @@ test("an expired session (401 mid-use) signs in once more and carries on", async
 
 test("over MCP: results are JSON text with structuredContent, an image comes back as image content, errors are isError", async () => {
   const world = await makeWorld();
-  const { client, close } = await connect(world, { allowSend: true, confirmSend: async () => false });
+  const { client, close } = await connect(world);
   const tools = (await client.listTools()).tools;
   assert.equal(tools.length, 6);
   const list = await client.callTool({ name: "salt_me_list_chats", arguments: {} });
@@ -421,7 +406,7 @@ test("SECRETS NEVER APPEAR: not the password, the DEK, the auth string or the JW
   for (const k of Object.keys(original)) console[k] = (...a) => logged.push(a.map(String).join(" "));
   const outputs = [];
   try {
-    const { client, close } = await connect(world, { allowSend: true, confirmSend: async () => true });
+    const { client, close } = await connect(world);
     const call = async (name, args) => outputs.push(JSON.stringify(await client.callTool({ name, arguments: args })));
     await call("salt_me_whoami", {});
     await call("salt_me_list_chats", {});
@@ -541,44 +526,28 @@ test("a message that fakes the label still sits inside the real one", async () =
   assert.equal(out.messages.at(-1).text, D(forged));
 });
 
-test("send refuses text that could look different from what is sent, and never reaches the dialog", async () => {
+test("send refuses text that could look different from what is sent", async () => {
   const world = await makeWorld();
-  let asked = 0;
-  const h = handlersFor(world, { allowSend: true, confirmSend: async () => (asked++, true) });
+  const h = handlersFor(world);
   const bad = [
-    "innocent ‮txet gnirev‬",
-    "zero​width",
-    "joiner‍here",
+    "innocent \u202Etxet gnirev\u202C",
+    "zero\u200Bwidth",
+    "joiner\u200Dhere",
     "bell\u0007",
     "tag\u0000nul",
-    "line separator",
-    "bom﻿here",
+    "line\u2028separator",
+    "bom\uFEFFhere",
     "ok" + "\n".repeat(60) + "hidden payload",
     "x".repeat(1001),
   ];
   for (const text of bad) await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text }), /hidden or control characters|limited to 1000/, JSON.stringify(text.slice(0, 20)));
-  assert.equal(asked, 0);
   assert.equal(world.posted.length, 0);
 });
 
-test("send: tabs and ordinary newlines are fine; CRLF is normalised; what the dialog shows is exactly what is sent", async () => {
+test("send: tabs and ordinary newlines are fine; CRLF is normalised", async () => {
   const world = await makeWorld();
-  const shown = [];
-  const h = handlersFor(world, { allowSend: true, confirmSend: async (d) => (shown.push(d.text), true) });
+  const h = handlersFor(world);
   await h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "line one\r\n\tindented\rthree" });
-  assert.deepEqual(shown, ["line one\n\tindented\nthree"]);
-  assert.equal(await decryptWith(world.keys.ada.privateKey, world.posted[0].body.message), shown[0]);
-  assert.equal(await decryptWith(world.keys.me.privateKey, world.posted[0].body.message), shown[0]);
-});
-
-test("send into an open room tells the dialog it is open", async () => {
-  const world = await makeWorld();
-  const dialogs = [];
-  const h = handlersFor(world, { allowSend: true, confirmSend: async (d) => (dialogs.push(d), false) });
-  await h.callTool("salt_me_send", { chat_id: CHAT_OPEN, text: "hello world" });
-  assert.equal(dialogs[0].open, true);
-  assert.equal(dialogs[0].chatName, "Open lounge");
-  await h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "hello ada" });
-  assert.equal(dialogs[1].open, false);
-  assert.equal(world.posted.length, 0);
+  assert.equal(await decryptWith(world.keys.ada.privateKey, world.posted[0].body.message), "line one\n\tindented\nthree");
+  assert.equal(await decryptWith(world.keys.me.privateKey, world.posted[0].body.message), "line one\n\tindented\nthree");
 });

@@ -3,7 +3,7 @@
 //   --as-me          a stdio MCP server on the owner's own computer. It signs in to Salt as the owner, unlocks the
 //                    messages key LOCALLY with the password the owner types into a hidden dialog the first time a tool
 //                    needs it, and lets the owner's AI read their end-to-end encrypted chats. Nothing is saved: not the
-//                    password, not the key. Read-only unless --allow-send. On exit it signs out, revoking its session.
+//                    password, not the key. Sends as the owner by default; --read-only turns sending off (--allow-send is accepted and does nothing). On exit it signs out, revoking its session.
 //
 // stdout is the MCP channel: everything here that talks to a person goes to stderr.
 
@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { toolResult } from "./tool-result.mjs";
 import { createMeSession, DEFAULT_HOST } from "./me-session.mjs";
 import { createMeHandlers, McpContent } from "./me-tools.mjs";
-import { createSecrets, createSendConfirmation } from "./me-secrets.mjs";
+import { createSecrets } from "./me-secrets.mjs";
 
 const { version: PACKAGE_VERSION } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -72,7 +72,7 @@ export function buildMeServer(handlers) {
 
 export async function runAsMe({ argv = process.argv.slice(2), env = process.env, platform = process.platform, secrets, runScript } = {}) {
   checkPlatform({ platform, env });
-  const allowSend = argv.includes("--allow-send");
+  const readOnly = argv.includes("--read-only");
   secrets ??= createSecrets({ env, platform, ...(runScript ? { runScript } : {}) });
   const host = (env.HOST || DEFAULT_HOST).replace(/\/$/, "");
   assertSafeHost(host, env);
@@ -82,7 +82,7 @@ export async function runAsMe({ argv = process.argv.slice(2), env = process.env,
     readEmail: () => secrets.readEmail(),
     readPassword: (kind) => secrets.readPassword(kind),
   });
-  const handlers = createMeHandlers({ session, allowSend, confirmSend: createSendConfirmation({ platform, ...(runScript ? { runScript } : {}) }), host });
+  const handlers = createMeHandlers({ session, readOnly, host });
   const server = buildMeServer(handlers);
   await server.connect(new StdioServerTransport());
 
@@ -98,5 +98,5 @@ export async function runAsMe({ argv = process.argv.slice(2), env = process.env,
   process.once("SIGINT", leave);
   process.once("SIGTERM", leave);
 
-  log(`as-me ready (${host}); ${handlers.toolCount} tools; ${allowSend ? "SENDING ENABLED (each message needs your OK in a dialog)" : "read-only"}; asks for your password on first use, saves nothing`);
+  log(`as-me ready (${host}); ${handlers.toolCount} tools; ${readOnly ? "read-only" : "sends as you at once (--read-only turns that off)"}; asks for your password on first use, saves nothing`);
 }

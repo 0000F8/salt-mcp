@@ -55,10 +55,10 @@ async function serveWorld(world) {
 const spawnClient = (args, env) =>
   new StdioClientTransport({ command: process.execPath, args: ["src/index.mjs", ...args], env: { PATH: process.env.PATH, ...env }, stderr: "pipe" });
 
-test("a real `salt-mcp --as-me` process: five read tools, nothing asked until used, a clean sign-out when the client leaves", async () => {
+test("a real `salt-mcp --as-me --read-only` process: five read tools, nothing asked until used, a clean sign-out when the client leaves", async () => {
   const world = await makeWorld({ authIterations: 600000 });
   const { server, host } = await serveWorld(world);
-  const transport = spawnClient(["--as-me"], { SALT_ME_EMAIL: EMAIL, SALT_ME_PASSWORD_CMD: `printf %s '${PASSWORD}'`, HOST: host });
+  const transport = spawnClient(["--as-me", "--read-only"], { SALT_ME_EMAIL: EMAIL, SALT_ME_PASSWORD_CMD: `printf %s '${PASSWORD}'`, HOST: host });
   const client = new Client({ name: "test", version: "0" }, { capabilities: {} });
   const stderr = [];
   await client.connect(transport);
@@ -97,14 +97,19 @@ test("a real process with nothing signed in leaves without calling sign-out", as
   server.close();
 });
 
-test("`--as-me --allow-send` adds the send tool in a real process", async () => {
-  const client = new Client({ name: "test", version: "0" }, { capabilities: {} });
-  await client.connect(spawnClient(["--as-me", "--allow-send"], { SALT_ME_EMAIL: EMAIL, SALT_ME_PASSWORD_CMD: "echo x", HOST: "http://127.0.0.1:9" }));
-  try {
-    assert.ok((await client.listTools()).tools.some((t) => t.name === "salt_me_send"));
-  } finally {
-    await client.close();
-  }
+test("`--as-me` has the send tool by default in a real process, `--read-only` removes it, `--allow-send` is a harmless no-op", async () => {
+  const names = async (args) => {
+    const client = new Client({ name: "test", version: "0" }, { capabilities: {} });
+    await client.connect(spawnClient(args, { SALT_ME_EMAIL: EMAIL, SALT_ME_PASSWORD_CMD: "echo x", HOST: "http://127.0.0.1:9" }));
+    try {
+      return (await client.listTools()).tools.map((t) => t.name);
+    } finally {
+      await client.close();
+    }
+  };
+  assert.ok((await names(["--as-me"])).includes("salt_me_send"));
+  assert.ok((await names(["--as-me", "--allow-send"])).includes("salt_me_send"));
+  assert.ok(!(await names(["--as-me", "--read-only"])).includes("salt_me_send"));
 });
 
 test("a real process refuses to start with the certificate check off", async () => {

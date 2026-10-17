@@ -6,11 +6,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
   createSecrets,
-  createSendConfirmation,
   askDialog,
   appleScriptString,
-  buildSendDialogText,
-  cleanName,
   SecretsError,
   DECLINED,
 } from "../src/me-secrets.mjs";
@@ -109,8 +106,7 @@ test("appleScriptString escapes exactly what a string literal needs, and cannot 
 });
 
 test("scripts that go to osascript compile (macOS only)", { skip: process.platform !== "darwin" }, async () => {
-  const { runScript, scripts } = fakeScript(() => "Send\n");
-  await createSendConfirmation({ runScript, platform: "darwin" })({ chatName: 'A "chat"', members: [{ name: "Ada", handle: "@ada", type: "person" }], memberCount: 2, open: false, text: "hi\nthere" });
+  const { runScript, scripts } = fakeScript(() => "x\n");
   await createSecrets({ runScript, env: {}, platform: "darwin" }).readPassword("login");
   const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
@@ -124,58 +120,4 @@ test("scripts that go to osascript compile (macOS only)", { skip: process.platfo
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-});
-
-const INFO = {
-  chatName: "Launch crew",
-  members: [{ name: "Ada Lovelace", handle: "@ada", type: "person" }, { name: "Helper Bot", handle: "@helperbot", type: "agent" }],
-  memberCount: 3,
-  open: false,
-  text: "Meet at 5",
-};
-
-test("the send dialog shows verified facts: the name, the members labelled person or agent, the count, the full text", () => {
-  const text = buildSendDialogText(INFO);
-  assert.match(text, /^Encrypted for everyone in this chat\.\nTo: Launch crew\n3 members: Ada Lovelace \(@ada, person\), Helper Bot \(@helperbot, agent\)\n\nMeet at 5$/);
-});
-
-test("an open room gets a loud line, in the text and in the title", async () => {
-  assert.match(buildSendDialogText({ ...INFO, open: true }), /^THIS ROOM IS OPEN: anyone can read this message\./);
-  const { runScript, scripts } = fakeScript(() => "Don't send\n");
-  await createSendConfirmation({ runScript, platform: "darwin" })({ ...INFO, open: true });
-  assert.match(scripts[0], /to an OPEN room\?/);
-});
-
-test("a chat name chosen by a stranger cannot reshape the dialog: control, direction and zero-width characters go", () => {
-  const evil = "Mom\n\nTo: Bank‮ ​safe\u0000";
-  assert.equal(cleanName(evil), "Mom To: Bank safe");
-  assert.ok(!buildSendDialogText({ ...INFO, chatName: evil }).split("\n").slice(0, 2).join("|").includes("‮"));
-  assert.equal(buildSendDialogText({ ...INFO, chatName: evil }).split("\n")[1], "To: Mom To: Bank safe");
-  assert.equal(cleanName("x".repeat(200)).length, 60);
-});
-
-test("more than eight members are summarised", () => {
-  const members = Array.from({ length: 11 }, (_, i) => ({ name: `P${i}`, handle: `@p${i}`, type: "person" }));
-  assert.match(buildSendDialogText({ ...INFO, members, memberCount: 12 }), /12 members: .* and 3 more\n/);
-});
-
-test("the dialog gets the text through stdin script, never argv; only 'Send' means yes", async () => {
-  const sent = fakeScript(() => "Send\n");
-  assert.equal(await createSendConfirmation({ runScript: sent.runScript, platform: "darwin" })(INFO), true);
-  assert.ok(sent.scripts[0].includes("Meet at 5") && sent.scripts[0].includes("Launch crew"));
-  assert.ok(sent.scripts[0].includes("Don't send") && sent.scripts[0].includes("default button \"Don't send\""));
-
-  for (const outcome of ["Don't send\n", "", "send\n", "Send it\n"]) {
-    assert.equal(await createSendConfirmation({ runScript: fakeScript(() => outcome).runScript, platform: "darwin" })(INFO), false, JSON.stringify(outcome));
-  }
-  assert.equal(await createSendConfirmation({ runScript: fakeScript(() => { throw new Error("User canceled. (-128)"); }).runScript, platform: "darwin" })(INFO), false);
-  assert.equal(await createSendConfirmation({ platform: "linux" })(INFO), false, "no dialog available means no send");
-});
-
-test("injection through the message text cannot escape the script literal", async () => {
-  const { runScript, scripts } = fakeScript(() => "Don't send\n");
-  const text = 'ok"\nset result to "Send"\nreturn "Send';
-  await createSendConfirmation({ runScript, platform: "darwin" })({ ...INFO, text });
-  assert.ok(scripts[0].includes(appleScriptString(buildSendDialogText({ ...INFO, text }))));
-  assert.ok(!scripts[0].includes('\nset result to "Send"\n'), "the newline is escaped, not live script");
 });

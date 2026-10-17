@@ -1,7 +1,6 @@
 // Where `salt-mcp --as-me` gets the owner's password, and the native macOS
-// dialogs it uses: a hidden password prompt the first time a tool needs to
-// unlock, and the Send / Don't send confirmation in front of every outgoing
-// message.
+// dialog it uses: a hidden password prompt the first time a tool needs to
+// unlock.
 //
 // NOTHING IS STORED. A Keychain item made by /usr/bin/security is readable,
 // without a prompt, by any process of the same user -- including an AI client
@@ -112,52 +111,5 @@ export function createSecrets({ execFile = defaultExecFile, runScript = defaultR
       if (platform !== "darwin") throw new SecretsError("Set SALT_ME_EMAIL to your Salt email.");
       return (await askDialog("Salt MCP wants to read your chats on this Mac.\nEnter your Salt email.", { hidden: false, runScript, platform })).trim();
     },
-  };
-}
-
-const clean = (s, max) =>
-  String(s ?? "")
-    .replace(UNSHOWABLE, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, max);
-
-/** Strips control and format characters from a name a stranger may have chosen, so it cannot reshape the dialog. */
-export const cleanName = (s, max = 60) => clean(s, max);
-
-/**
- * The text of the confirmation: facts Salt verified (the member list, the count, whether the room is open), then the
- * message exactly as it will be sent.
- * @param {{chatName: string, members: {name: string, handle: string|null, type: string}[], memberCount: number, open: boolean, text: string}} info
- */
-export function buildSendDialogText({ chatName, members, memberCount, open, text }) {
-  const shown = members.slice(0, 8).map((m) => `${cleanName(m.name, 30)}${m.handle ? ` (${cleanName(m.handle, 31)}, ${m.type})` : ` (${m.type})`}`);
-  const more = members.length > 8 ? ` and ${members.length - 8} more` : "";
-  return [
-    open ? "THIS ROOM IS OPEN: anyone can read this message." : "Encrypted for everyone in this chat.",
-    `To: ${cleanName(chatName)}`,
-    `${memberCount} member${memberCount === 1 ? "" : "s"}: ${shown.join(", ") || "only you"}${more}`,
-    "",
-    text,
-  ].join("\n");
-}
-
-/**
- * The native confirmation in front of every send. Anything but an explicit "Send" (the other button, closing it, an
- * error, no dialog available) is a no.
- * @returns {(info: Parameters<typeof buildSendDialogText>[0]) => Promise<boolean>}
- */
-export function createSendConfirmation({ runScript = defaultRunScript, platform = process.platform } = {}) {
-  return async function confirmSend(info) {
-    if (platform !== "darwin") return false;
-    const title = `Salt MCP: send ${info.text.length} characters${info.open ? " to an OPEN room" : ""}?`;
-    const script =
-      `button returned of (display dialog ${appleScriptString(buildSendDialogText(info))} with title ${appleScriptString(title)} ` +
-      `buttons {"Don't send", "Send"} default button "Don't send" cancel button "Don't send" with icon caution)\n`;
-    try {
-      return stripOneNewline(await runScript(script)) === "Send";
-    } catch {
-      return false;
-    }
   };
 }
