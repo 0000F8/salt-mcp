@@ -369,11 +369,10 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
   const sealedPath = `${base}/api/v1/linked_devices/self/sealed_key`;
   const authed = (link, init = {}) => ({ ...init, headers: { Accept: "application/json", Authorization: `Bearer ${link.token}`, ...init.headers }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
 
-  /** Tells Salt this computer holds the new generation (POST .../ack; DELETE on the sealed_key itself where that is the route). Best effort. */
-  async function ackPickup(link, generation) {
+  /** Tells Salt this computer holds the new generation: DELETE .../self/sealed_key (204, idempotent). Best effort. */
+  async function ackPickup(link) {
     try {
-      let res = await doFetch(`${sealedPath}/ack`, authed(link, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generation }) }));
-      if (res.status === 404 || res.status === 405) res = await doFetch(sealedPath, authed(link, { method: "DELETE" }));
+      const res = await doFetch(sealedPath, authed(link, { method: "DELETE" }));
       return res.ok;
     } catch {
       return false;
@@ -385,6 +384,7 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
    *   { status: "none" }                      nothing waiting (or this computer already holds it: acked again)
    *   { status: "picked_up", generation }     verified, stored (the link file's sealed key is replaced), acked
    *   { status: "refused" }                   verification failed: nothing stored, nothing acked, the old key still reads
+   *   { status: "needs_relink" }              Salt says the pending key expired: this computer must be linked again
    * and throws LinkError kind "unlinked" on 401 device_unlinked, kind "network" when Salt cannot be reached.
    */
   async function pickup(link) {
@@ -399,7 +399,11 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
       if (body?.code === "device_unlinked") throw new LinkError("This computer was unlinked.", { status: 401, kind: "unlinked" });
       throw new LinkError("Salt refused the link (401).", { status: 401, kind: "link" });
     }
-    if (res.status === 204 || res.status === 404) return { status: "none" };
+    if (res.status === 404) {
+      const body = await res.json().catch(() => null);
+      return body?.code === "no_pending_key" && body.needs_relink === true ? { status: "needs_relink" } : { status: "none" };
+    }
+    if (res.status === 204) return { status: "none" };
     if (!res.ok) throw new LinkError(`Salt answered the key pickup with ${res.status}.`, { status: res.status, kind: "link" });
     const body = await res.json().catch(() => null);
     const sealed = body?.sealed_key;
@@ -407,7 +411,7 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
     const generation = Number(body.generation);
     const held = Number(link.sealed_key_generation ?? 1);
     if (Number.isFinite(generation) && generation <= held) {
-      await ackPickup(link, generation); // already held (an ack that did not land last time)
+      await ackPickup(link); // already held (an ack that did not land last time)
       return { status: "none" };
     }
     try {
@@ -423,7 +427,7 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
       if (Number.isFinite(generation) && next.generation !== generation) throw new Error("generation");
       const { device_private_key: key, ...rest } = link;
       write({ ...rest, ...(link.key_store === "file" ? { device_private_key: key } : {}), sealed_key: sealed, sealed_key_generation: next.generation, held_fingerprint: next.fingerprint });
-      await ackPickup(link, next.generation);
+      await ackPickup(link);
       return { status: "picked_up", generation: next.generation };
     } catch (err) {
       if (err instanceof LinkError && err.kind !== "verify") throw err;

@@ -49,9 +49,9 @@ async function setup() {
     st.calls.push(`${method} ${path}`);
     if (init.headers?.Authorization !== `Bearer ${TOKEN}`) return json({ error: "unauthorized" }, 401);
     if (path === "/api/v1/userkeys") return json({ public_key: st.serverKey.publicKey, public_fingerprint: st.serverKey.fingerprint });
-    if (method === "GET" && path === "/api/v1/linked_devices/self/sealed_key") return st.pending ? json(st.pending) : new Response(null, { status: 204 });
-    if (method === "POST" && path === "/api/v1/linked_devices/self/sealed_key/ack") {
-      st.acked.push(JSON.parse(init.body).generation);
+    if (method === "GET" && path === "/api/v1/linked_devices/self/sealed_key") return st.pending ? json(st.pending) : st.needsRelink ? json({ code: "no_pending_key", key_generation: 3, sealed_key_generation: 1, needs_relink: true }, 404) : json({ code: "no_pending_key", needs_relink: false }, 404);
+    if (method === "DELETE" && path === "/api/v1/linked_devices/self/sealed_key") {
+      st.acked.push(st.pending?.generation ?? "again");
       st.pending = null;
       return new Response(null, { status: 204 });
     }
@@ -65,7 +65,7 @@ async function setup() {
   const mk = () => createLinkClient({ host: HOST, baseDir, fetchImpl, platform: "linux", log: () => {} });
   const linkClient = mk();
   const pend = async (payload, signers, generation = 2) => {
-    st.pending = { sealed_key: await seal(payload, device, signers), generation };
+    st.pending = { sealed_key: await seal(payload, device, signers), generation, sealed_at: "2026-10-17T00:00:00Z", expires_at: "2026-10-31T00:00:00Z" };
   };
   const v2 = (keys, userId = USER.id) => ({ v: 2, user_id: userId, keys });
   return { st, device, oldK, newK, stranger, linkClient, fetchImpl, mk, file, pend, v2, openpgp, stored: () => JSON.parse(readFileSync(file, "utf8")) };
@@ -129,6 +129,18 @@ test("nothing pending is not an error; a 401 device_unlinked is surfaced", async
   assert.deepEqual(await t.linkClient.pickup(t.linkClient.read()), { status: "none" });
   const gone = createLinkClient({ host: HOST, baseDir: join(tmpdir(), "x"), platform: "linux", log: () => {}, fetchImpl: async () => json({ code: "device_unlinked" }, 401) });
   await assert.rejects(gone.pickup({ token: TOKEN, sealed_key: "x", device_private_key: "x" }), (e) => e.kind === "unlinked");
+});
+
+test("needs_relink: the pending key expired, so the stored link is dropped and linking starts again", async () => {
+  const t = await setup();
+  t.st.needsRelink = true;
+  t.st.serverKey = t.newK;
+  const status = await t.linkClient.pickup(t.linkClient.read());
+  assert.deepEqual(status, { status: "needs_relink" });
+  assert.deepEqual(t.st.acked, []);
+  const session = createMeSession({ host: HOST, fetchImpl: t.fetchImpl, linkClient: t.mk() });
+  await assert.rejects(session.decrypt("x"), (e) => e.kind === "link_pending" || /link/i.test(e.message));
+  assert.equal(t.linkClient.read(), null);
 });
 
 test("unlocking picks up a waiting re-seal first, even while the server already serves the new key", async () => {

@@ -176,6 +176,7 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     if (!linkMode || res.status !== 409 || (await res.clone().json().catch(() => null))?.code !== "pickup_required") return null;
     const link = await loadLinked();
     const status = await pickUpLinked(link);
+    if (status === "needs_relink") await relink();
     if (status !== "picked_up") return null;
     await openLinked((await linkClient.load()) ?? link);
     return true;
@@ -251,7 +252,7 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
 
   async function unlockLinked() {
     const link = await loadLinked();
-    await pickUpLinked(link);
+    if ((await pickUpLinked(link)) === "needs_relink") await relink(); // the pending key expired: link again
     await openLinked((await linkClient.load()) ?? link);
   }
 
