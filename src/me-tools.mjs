@@ -482,6 +482,18 @@ export function createMeHandlers({ session, readOnly = false, host }) {
   function whoami() {
     const s = session.status;
     const me = session.me;
+    if (s.linked !== undefined) {
+      return {
+        linked: s.linked,
+        device_name: s.device_name,
+        linked_at: s.linked_at,
+        account: me?.id ? { id: me.id, username: me.username, display_name: me.display_name } : {},
+        unlocked: s.unlocked,
+        host,
+        send_enabled: !readOnly,
+        ...(s.linked ? {} : { note: "Not linked yet. The first tool call opens a page with a code to scan with your phone." }),
+      };
+    }
     return {
       account: { ...(session.email ? { email: session.email } : {}), ...(me?.id ? { id: me.id, username: me.username, display_name: me.display_name } : {}) },
       unlocked: s.unlocked,

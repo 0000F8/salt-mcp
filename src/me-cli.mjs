@@ -1,9 +1,18 @@
 // Entry point of `salt-mcp --as-me`.
 //
-//   --as-me          a stdio MCP server on the owner's own computer. It signs in to Salt as the owner, unlocks the
-//                    messages key LOCALLY with the password the owner types into a hidden dialog the first time a tool
-//                    needs it, and lets the owner's AI read their end-to-end encrypted chats. Nothing is saved: not the
-//                    password, not the key. Sends as the owner by default; --read-only turns sending off (--allow-send is accepted and does nothing). On exit it signs out, revoking its session.
+//   --as-me          a stdio MCP server on the owner's own computer that lets the owner's AI read their end-to-end
+//                    encrypted chats, decrypted LOCALLY. Sends as the owner by default; --read-only turns sending off
+//                    (--allow-send is accepted and does nothing).
+//                    Default sign-in is a LINK (me-link.mjs): the first tool call opens a page with a QR code, the
+//                    owner's phone scans and approves it, and this computer keeps a linked-device token and the
+//                    messages key, sealed to a key it made, in ~/Library/Application Support/salt-mcp/link-<host>.json
+//                    (0600). That file IS stored: a program running as you can read it. The token reaches chats only,
+//                    never wallets, money or settings; unlink from the phone (Connections) or with --unlink.
+//   --password       the older path: signs in with the Salt password typed into a hidden dialog (or
+//                    SALT_ME_PASSWORD_CMD, which implies --password), unlocks the key locally, saves nothing, and
+//                    signs out on exit, revoking its session.
+//   --unlink         cancels this computer's link (DELETE /api/v1/linked_devices/<id> with its own token), removes
+//                    the link file and exits.
 //
 // stdout is the MCP channel: everything here that talks to a person goes to stderr.
 
@@ -15,6 +24,7 @@ import { toolResult } from "./tool-result.mjs";
 import { createMeSession, DEFAULT_HOST } from "./me-session.mjs";
 import { createMeHandlers, McpContent } from "./me-tools.mjs";
 import { createSecrets } from "./me-secrets.mjs";
+import { createLinkClient } from "./me-link.mjs";
 
 const { version: PACKAGE_VERSION } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -27,8 +37,8 @@ const INSTRUCTIONS =
 export class AsMeStartError extends Error {}
 
 /** Refuses to run where there is no password dialog and no configured password command. Pure, so a test can drive it. */
-export function checkPlatform({ platform = process.platform, env = process.env } = {}) {
-  if (platform !== "darwin" && !env.SALT_ME_PASSWORD_CMD) {
+export function checkPlatform({ platform = process.platform, env = process.env, password = true } = {}) {
+  if (password && platform !== "darwin" && !env.SALT_ME_PASSWORD_CMD) {
     throw new AsMeStartError(
       "salt-mcp --as-me asks for your password in a macOS dialog, so it runs on a Mac. " +
         "On another system, set SALT_ME_PASSWORD_CMD to a command that prints your Salt password (for example a secret-tool lookup)."
@@ -70,23 +80,36 @@ export function buildMeServer(handlers) {
   return server;
 }
 
-export async function runAsMe({ argv = process.argv.slice(2), env = process.env, platform = process.platform, secrets, runScript } = {}) {
-  checkPlatform({ platform, env });
+export async function runAsMe({ argv = process.argv.slice(2), env = process.env, platform = process.platform, secrets, runScript, linkOptions = {} } = {}) {
+  const passwordMode = argv.includes("--password") || Boolean(env.SALT_ME_PASSWORD_CMD);
+  checkPlatform({ platform, env, password: passwordMode });
   const readOnly = argv.includes("--read-only");
-  secrets ??= createSecrets({ env, platform, ...(runScript ? { runScript } : {}) });
   const host = (env.HOST || DEFAULT_HOST).replace(/\/$/, "");
   assertSafeHost(host, env);
+  const linkClient = passwordMode ? null : createLinkClient({ host, ...linkOptions });
+
+  if (argv.includes("--unlink")) {
+    const link = linkClient?.read();
+    if (!link) return log("nothing to unlink: this computer has no link for " + host);
+    const cancelled = await linkClient.unlinkRemote(link);
+    linkClient.remove();
+    return log(cancelled ? "unlinked: Salt cancelled this computer's link and the link file is deleted" : "link file deleted; Salt could not be told, so also unlink this computer from your phone (Connections)");
+  }
+
+  secrets ??= passwordMode ? createSecrets({ env, platform, ...(runScript ? { runScript } : {}) }) : null;
   const session = createMeSession({
     host,
     email: env.SALT_ME_EMAIL?.trim() || null,
     readEmail: () => secrets.readEmail(),
     readPassword: (kind) => secrets.readPassword(kind),
+    linkClient,
   });
   const handlers = createMeHandlers({ session, readOnly, host });
   const server = buildMeServer(handlers);
   await server.connect(new StdioServerTransport());
 
-  // The session is revoked on the way out, so restarting the server does not leave live 30-day tokens behind.
+  // A password session is revoked on the way out, so restarting the server does not leave live 30-day tokens behind
+  // (a link has no session: signOut only lets go of the key in memory).
   let leaving = false;
   const leave = () => {
     if (leaving) return;
@@ -98,5 +121,5 @@ export async function runAsMe({ argv = process.argv.slice(2), env = process.env,
   process.once("SIGINT", leave);
   process.once("SIGTERM", leave);
 
-  log(`as-me ready (${host}); ${handlers.toolCount} tools; ${readOnly ? "read-only" : "sends as you at once (--read-only turns that off)"}; asks for your password on first use, saves nothing`);
+  log(`as-me ready (${host}); ${handlers.toolCount} tools; ${readOnly ? "read-only" : "sends as you at once (--read-only turns that off)"}; ${passwordMode ? "asks for your password on first use, saves nothing" : "linked from your phone (first use opens a code to scan)"}`);
 }

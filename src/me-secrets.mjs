@@ -1,4 +1,7 @@
-// Where `salt-mcp --as-me` gets the owner's password, and the native macOS
+// (Password path only: --password, or SALT_ME_PASSWORD_CMD. The default sign-in is the phone link, me-link.mjs,
+// which stores a link file instead -- see below for why this path stores nothing.)
+//
+// Where `salt-mcp --as-me --password` gets the owner's password, and the native macOS
 // dialog it uses: a hidden password prompt the first time a tool needs to
 // unlock.
 //

@@ -8,11 +8,16 @@
 //             remembers a failure for a while instead of retrying on every tool call.
 //   unlock    GET /api/v1/userkeys, and (for a vault key) GET /api/v1/vault; see me-crypto.mjs.
 //
+// LINK MODE (the default of --as-me, me-link.mjs): there is no sign-in. The stored `sld_` linked-device token is
+// the `Authorization: Bearer` of every call, the key is the one the phone sealed to this computer, and a 401 with
+// code device_unlinked deletes the link file and starts a new link. /auth/sign_in, /auth/sign_out and
+// /api/v1/vault are never called. The password path below is --password.
+//
 // Everything is lazy: nothing happens until the first tool call, which asks
 // the owner for the password (me-secrets.mjs). The raw password, the vault wrap
 // and the DEK exist only inside unlock(); the password reference is dropped when
 // it returns and what stays in memory is the signed-in token and the opened PGP
-// key. On exit signOut() revokes the token. Nothing in this file writes to disk,
+// key. On exit signOut() revokes the token. In password mode nothing in this file writes to disk (the link file is me-link.mjs's),
 // and no request, header or body is ever logged.
 
 import {
@@ -23,6 +28,7 @@ import {
   createMessageDecryptor,
   MAX_ATTACHMENT_BYTES,
 } from "./me-crypto.mjs";
+import { LINK_FIRST, LinkError } from "./me-link.mjs";
 
 export const DEFAULT_HOST = "https://saltapp.ai";
 
@@ -48,11 +54,13 @@ const FAILURE_MEMORY_MS = 30000;
  * @param {{
  *   host?: string, email?: string, readEmail?: () => Promise<string>,
  *   readPassword: (kind: "login"|"vault") => Promise<string>,
- *   fetchImpl?: typeof fetch, now?: () => number, signInIterations?: number,
+ *   fetchImpl?: typeof fetch, now?: () => number, signInIterations?: number, linkClient?: ReturnType<typeof import('./me-link.mjs').createLinkClient>,
  * }} options
- * `signInIterations` exists for tests; production never passes it.
+ * `signInIterations` exists for tests; production never passes it. With a `linkClient` the session runs in LINK mode
+ * (the default sign-in of --as-me): the stored `sld_` token replaces the JWT for every call, nothing is signed in
+ * or out, and the key comes from the phone-sealed key; without one it is the password path (--password).
  */
-export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, readPassword, fetchImpl, now = () => Date.now(), signInIterations }) {
+export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, readPassword, fetchImpl, now = () => Date.now(), signInIterations, linkClient = null }) {
   const base = host.replace(/\/$/, "");
   const doFetch = fetchImpl ?? fetch;
 
@@ -65,6 +73,23 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
   let unlocking = null;
   let failure = null; // { error, at }
   let signInFlight = null;
+  const linkMode = Boolean(linkClient);
+
+  const linkPending = (started) => new MeError(started.opened ? LINK_FIRST : `${LINK_FIRST} If no page opened, open this address: ${started.url}`, { kind: "link_pending" });
+  const asMeError = (err) => (err instanceof LinkError ? new MeError(err.message, { status: err.status, kind: err.kind }) : err);
+
+  /** The link is gone (unlinked from the phone, or never made): forget it and start linking. Always throws. */
+  async function relink() {
+    linkClient.remove();
+    token = null;
+    privateKey = null;
+    decryptText = null;
+    try {
+      throw linkPending(await linkClient.begin());
+    } catch (err) {
+      throw asMeError(err);
+    }
+  }
 
   async function send(method, path, { body, headers = {}, authed = true, as = "json" } = {}) {
     const init = {
@@ -111,6 +136,11 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
 
   /** One request as the owner. A 401 means the 30-day session ended: sign in again once and retry. */
   async function request(method, path, opts = {}) {
+    if (linkMode) {
+      const res = await send(method, path, opts);
+      if (res.status === 401 && (await res.clone().json().catch(() => null))?.code === "device_unlinked") await relink();
+      return res;
+    }
     if (!token) await ensureSignedIn();
     let res = await send(method, path, opts);
     if (res.status === 401 && !opts.retried) {
@@ -164,7 +194,26 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     return buf;
   }
 
+  // Link mode: the stored link, or a new one started (which asks the owner to scan it, so this throws).
+  async function unlockLinked() {
+    const link = linkClient.read();
+    if (!link) await relink();
+    token = `Bearer ${link.token}`;
+    user = { id: link.user?.id ?? null, username: link.user?.handle ?? null, display_name: link.user?.name ?? null };
+    let armored;
+    try {
+      armored = await linkClient.open(link);
+    } catch (err) {
+      if (err?.kind === "unlinked") await relink();
+      throw asMeError(err);
+    }
+    lockMode = "link";
+    privateKey = await openPrivateKey(armored);
+    decryptText = createMessageDecryptor(privateKey);
+  }
+
   async function unlock() {
+    if (linkMode) return unlockLinked();
     const { password } = await signIn();
     const userKeys = await getJson("/api/v1/userkeys");
     const userKey = Array.isArray(userKeys) ? userKeys[0] : userKeys;
@@ -203,7 +252,8 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
         privateKey = null;
         decryptText = null;
         const error = err instanceof MeError ? err : err?.declined ? new MeError(err.message, { kind: "declined" }) : new MeError(UNLOCK_FAILED, { kind: "unlock" });
-        failure = { error, at: now() };
+        // "Scan the code first" is not a failure to remember: the next call should look again at once.
+        if (error.kind !== "link_pending") failure = { error, at: now() };
         throw error;
       })
       .finally(() => {
@@ -218,7 +268,7 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     token = null;
     privateKey = null;
     decryptText = null;
-    if (!had) return;
+    if (!had || linkMode) return; // a link has no session to revoke: it is cancelled from the phone or with --unlink
     try {
       await doFetch(`${base}/auth/sign_out`, { method: "DELETE", headers: { Accept: "application/json", Authorization: had }, signal: AbortSignal.timeout(3000) });
     } catch {
@@ -244,7 +294,9 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
       return user;
     },
     get status() {
+      const link = linkMode ? linkClient.read() : null;
       return {
+        ...(linkMode ? { linked: Boolean(link), device_name: link?.linked_device?.name ?? null, linked_at: link?.linked_at ?? null } : {}),
         unlocked: Boolean(decryptText),
         lock_mode: lockMode,
         signed_in_at: signedInAt ? new Date(signedInAt).toISOString() : null,

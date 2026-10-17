@@ -281,7 +281,7 @@ export function buildLocalServer(handlers, { channel } = {}) {
 async function runMeMode(args) {
   try {
     if (args.includes("--as-me-setup")) {
-      console.log("There is no setup step any more: salt-mcp --as-me asks for your Salt password in a dialog when it first needs it, and saves nothing.");
+      console.log("There is no setup step any more: salt-mcp --as-me opens a page with a code to scan with your phone when it first needs to link (--password asks for your Salt password instead).");
       return;
     }
     await (await import("./me-cli.mjs")).runAsMe({ argv: args });
