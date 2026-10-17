@@ -1,0 +1,51 @@
+{
+  "manifest_version": "0.3",
+  "name": "salt-me",
+  "display_name": "Salt (my chats)",
+  "version": "0.4.0",
+  "description": "Let your AI read your own Salt chats, decrypted on your computer, and send as you.",
+  "long_description": "Runs salt-mcp --as-me: a local server that lets your AI read your own end-to-end encrypted Salt chats, decrypted on this computer, and send as you. The first use opens a page with a code; scan it with the Salt app on your phone (Menu, Devices, Link a computer) to link this computer. No password or key is typed into this bundle. Unlink from your phone (Connections) or with --unlink.",
+  "author": {
+    "name": "0x0000F8",
+    "email": "0000F8@proton.me",
+    "url": "https://saltapp.ai"
+  },
+  "homepage": "https://saltapp.ai",
+  "documentation": "https://github.com/0000F8/salt-mcp#readme",
+  "support": "https://github.com/0000F8/salt-mcp/issues",
+  "license": "MIT",
+  "keywords": [
+    "salt",
+    "saltapp",
+    "agents",
+    "ai-agents",
+    "crypto",
+    "payments",
+    "mcp"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "src/index.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/src/index.mjs",
+        "--as-me"
+      ]
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=0.10.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "privacy_policies": [
+    "https://saltapp.ai/privacy"
+  ]
+}

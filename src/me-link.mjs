@@ -30,12 +30,13 @@
 //
 // No token, key or sealed key is logged or put in an error message.
 
-import { execFile as nodeExecFile, spawn } from "node:child_process";
-import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, hostname as osHostname } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
+import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { loadOpenpgp } from "./local-decrypt.mjs";
+import { createKeychain, defaultBaseDir, defaultOpen, defaultRunCommand, defaultSetTimer, hostSlug, writePrivateJson } from "./link-store.mjs";
+
+export { defaultBaseDir, hostSlug };
 
 export const LINK_FIRST = "Link this computer first: a page with a code opened in your browser. Scan it with your phone, then try again.";
 export const POLL_MS = 3000;
@@ -51,29 +52,7 @@ export class LinkError extends Error {
   }
 }
 
-const defaultExecFile = promisify(nodeExecFile);
-const defaultOpen = (url) => defaultExecFile("/usr/bin/open", [url]);
-// Runs a program with an argument array (never a shell); `input` goes to its stdin. Resolves stdout.
-const defaultRunCommand = (file, args, { input } = {}) =>
-  new Promise((resolve, reject) => {
-    const child = spawn(file, args, { stdio: ["pipe", "pipe", "ignore"] });
-    let out = "";
-    child.stdout.on("data", (d) => (out += d));
-    child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`${file} exit ${code}`))));
-    child.stdin.on("error", () => {});
-    child.stdin.end(input ?? "");
-  });
 const KEYCHAIN_SERVICE = "salt-mcp-link";
-const defaultSetTimer = (fn, ms) => {
-  const handle = setTimeout(fn, ms);
-  handle.unref?.();
-  return handle;
-};
-
-export const defaultBaseDir = () => join(homedir(), "Library", "Application Support", "salt-mcp");
-/** `https://saltapp.ai` -> `saltapp-ai`; the port stays, so a local server has its own link. */
-export const hostSlug = (host) => new URL(host).host.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 /**
  * Opens the sealed key. The sealed key must be encrypted to this computer's key AND signed by the owner's key
@@ -150,25 +129,12 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
     }
   }
 
-  function write(link) {
-    mkdirSync(baseDir, { recursive: true, mode: 0o700 });
-    chmodSync(baseDir, 0o700);
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(link), { mode: 0o600 });
-    chmodSync(tmp, 0o600);
-    renameSync(tmp, file);
-  }
+  const write = (link) => writePrivateJson(baseDir, file, link);
 
   // The device private key, base64 so it is one token. Written through `security -i` on stdin; read from stdout.
-  const keychainSet = (armored) => runCommand("/usr/bin/security", ["-i"], { input: `add-generic-password -U -s ${KEYCHAIN_SERVICE} -a ${slug} -w ${Buffer.from(armored, "utf8").toString("base64")}\n` });
-  const keychainGet = async () => {
-    try {
-      const out = String(await runCommand("/usr/bin/security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", slug, "-w"])).trim();
-      return out ? Buffer.from(out, "base64").toString("utf8") : null;
-    } catch {
-      return null;
-    }
-  };
+  const keychain = createKeychain({ runCommand, service: KEYCHAIN_SERVICE, account: slug });
+  const keychainSet = keychain.set;
+  const keychainGet = keychain.get;
 
   /** The stored link with its device private key (from the Keychain when it lives there), or null if either is gone. */
   async function load() {
@@ -200,7 +166,7 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
   /** Removes the file and the Keychain item (best effort for the item). */
   async function remove() {
     rmSync(file, { force: true });
-    if (onMac) await runCommand("/usr/bin/security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", slug]).catch(() => {});
+    if (onMac) await keychain.remove();
   }
 
   async function claim(p) {

@@ -535,6 +535,29 @@ environment switch. Plus the usual agent identity env (`HOST`, `SALT_API_KEY`,
 `SALT_APP_ID`, `APP_PUBLIC_KEY`, `APP_PRIVATE_KEY`; see "Configure one Salt
 agent identity").
 
+**Set up by scan (no credentials to paste).** With no `SALT_API_KEY` in the
+environment (or with `--link`), `salt-mcp --channel` makes its own agent by
+phone scan, the way `--as-me` links:
+
+```bash
+claude --dangerously-load-development-channels server:salt   # with: "args": ["-y", "salt-mcp", "--channel"], no env
+```
+
+The first start generates the agent's PGP key **on this computer**, opens a page
+with a code, and waits. In the Salt app go to Menu, Devices, Link a computer,
+scan it, and approve "Make an agent called Claude Code?" (nothing moves but the
+agent's public key; Salt never holds the private key). The new agent is called
+"Claude Code" and belongs to you. Its api key and private key go in your login
+Keychain (service `salt-mcp-channel`, written without appearing on a command
+line; off macOS they go in the file, with a line on stderr saying so); the rest
+is in `~/Library/Application Support/salt-mcp/channel-link-<host>.json` (`0600`,
+excluded from Time Machine). Later starts reuse it with no scan. **The
+allow-list defaults to you** (your user id) unless you set `SALT_CHANNEL_ALLOW`.
+To undo it: `npx salt-mcp --channel --unlink` removes the local state, then
+delete "Claude Code" in Salt (Developers), because Salt has no self-delete for
+an agent. If you set `SALT_API_KEY`, nothing here applies and the env path below
+is used exactly as before.
+
 Add it to your project's `.mcp.json`:
 
 ```json
@@ -661,6 +684,34 @@ opens a new one. The link lasts until you unlink it, like WhatsApp.
 **Unlinking.** On your phone: Salt, Connections, linked computers, Unlink. Or on
 this computer: `npx salt-mcp --as-me --unlink`. Either way the next request
 starts a new link.
+
+### Other AI apps (`--as-me`)
+
+The same `--as-me` server works in any app that can run an MCP server over
+stdio. The command is always `npx -y salt-mcp@0.4.0 --as-me` (it works once
+0.4.0 is on npm). It needs no key or secret in the config: the first use opens
+a page with a code, and you scan it with your phone.
+
+- **Claude Desktop (.mcpb).** Build `salt-me.mcpb` with `npm run bundle:me`
+  (it packs `manifest.as-me.json`, which asks for nothing), then double-click
+  it or drag it onto Claude Desktop.
+- **Cursor.** In `~/.cursor/mcp.json` (or the project's `.cursor/mcp.json`):
+  `{"mcpServers":{"salt-me":{"command":"npx","args":["-y","salt-mcp@0.4.0","--as-me"]}}}`
+- **VS Code.** `code --add-mcp "{\"name\":\"salt-me\",\"command\":\"npx\",\"args\":[\"-y\",\"salt-mcp@0.4.0\",\"--as-me\"]}"`
+- **ChatGPT desktop, or any MCP client with JSON config.** Add a local (stdio) server:
+
+```json
+{
+  "mcpServers": {
+    "salt-me": {
+      "command": "npx",
+      "args": ["-y", "salt-mcp@0.4.0", "--as-me"]
+    }
+  }
+}
+```
+
+Add `"--read-only"` to the args to turn sending off.
 
 **The older way (`--password`).** `salt-mcp --as-me --password` skips the link
 and signs in with your Salt password, typed into a hidden macOS dialog (or

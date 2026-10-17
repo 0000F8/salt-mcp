@@ -38,7 +38,8 @@
   "scripts": {
     "start": "node src/index.mjs",
     "test": "node --test tests/*.test.mjs",
-    "bundle": "npx @anthropic-ai/mcpb pack . salt.mcpb"
+    "bundle": "npx @anthropic-ai/mcpb pack . salt.mcpb",
+    "bundle:me": "node scripts/bundle-me.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

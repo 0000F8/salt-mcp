@@ -252,7 +252,7 @@ test("channel mode refuses to start without an allow-list", () => {
 
 test("the real process exits 1 with a stderr message and nothing on stdout when --channel has no allow-list", () => {
   const result = spawnSync(process.execPath, [new URL("../src/index.mjs", import.meta.url).pathname, "--channel"], {
-    env: { PATH: process.env.PATH },
+    env: { PATH: process.env.PATH, SALT_API_KEY: "sk_unused" },
     encoding: "utf8",
     timeout: 20_000,
   });

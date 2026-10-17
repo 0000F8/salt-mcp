@@ -42,6 +42,7 @@ import {
   createChannelBridge,
   sdkSocketFactory,
 } from "./channel.mjs";
+import { isChannelLinkMode, channelLinkEnv, runChannelUnlink } from "./channel-link.mjs";
 
 const {
   loadSaltAgentConfig,
@@ -144,17 +145,31 @@ export function createLocalHandlers({ actions, caller, host, decrypt, fetchImpl,
 // speaks MCP over stdio) so it only runs when this file is the process
 // entry point -- never on import, e.g. from a test.
 async function main() {
+  // `--channel` with no SALT_API_KEY (or `--link`) makes its own agent by phone scan; the linked identity is
+  // layered over a copy of the env (channel-link.mjs). Otherwise the env is used exactly as before.
+  const argv = process.argv.slice(2);
+  let env = process.env;
+  const linkMode = isChannelLinkMode(argv, env);
+  if (linkMode) {
+    try {
+      env = await channelLinkEnv({ env });
+    } catch (err) {
+      log(`ERROR: ${err?.message || err}`);
+      process.exit(1);
+    }
+  }
+
   // Checked before anything else: a channel with no allow-list must not start.
   let channelConfig;
   try {
-    channelConfig = loadChannelConfig();
+    channelConfig = loadChannelConfig(env, argv);
   } catch (err) {
     if (!(err instanceof ChannelConfigError)) throw err;
     log(`ERROR: ${err.message}`);
     process.exit(1);
   }
 
-  const config = loadSaltAgentConfig();
+  const config = loadSaltAgentConfig(env);
   const missing = validateSaltAgentConfig(config);
   if (missing.length) {
     log(`Missing required env vars: ${missing.join(", ")}. See README.`);
@@ -183,7 +198,7 @@ async function main() {
   // failure only warns: an offline launch should still come up.
   const check = await checkCredentials({ host: config.host, apiKey: caller.apiKey, appId: config.saltAppId });
   if (check.status === "unauthorized") {
-    log(`ERROR: ${check.message}`);
+    log(`ERROR: ${check.message}${linkMode ? " If the agent was deleted in Salt, run `salt-mcp --channel --unlink` and start again to make a new one." : ""}`);
     process.exit(1);
   }
   if (check.status !== "ok" || check.mismatch) log(`WARNING: ${check.message}`);
@@ -305,5 +320,6 @@ const isEntryPoint = () => {
 if (isEntryPoint()) {
   const args = process.argv.slice(2);
   if (args.includes("--as-me") || args.includes("--as-me-setup")) runMeMode(args);
+  else if (args.includes("--channel") && args.includes("--unlink")) runChannelUnlink().catch((err) => { log(`ERROR: ${err?.message || err}`); process.exit(1); });
   else main();
 }
