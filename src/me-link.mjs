@@ -55,13 +55,78 @@ export class LinkError extends Error {
 
 const KEYCHAIN_SERVICE = "salt-mcp-link";
 
+const NOT_TRUSTED = "Couldn't trust the link: the key sent to this computer was not signed by your Salt key. Nothing was saved.";
+
+/** Reads a sealed payload: v1 `{private_key, fingerprint}` or v2 `{keys:[{private_key, fingerprint, generation, active}]}`. Throws on any other shape. */
+function parsePayload(payload) {
+  if (payload?.v === 1 && typeof payload.private_key === "string") {
+    return { userId: payload.user_id, keys: [{ private_key: payload.private_key, fingerprint: String(payload.fingerprint), generation: 1, active: true }] };
+  }
+  if (payload?.v === 2 && Array.isArray(payload.keys) && payload.keys.length) {
+    const keys = payload.keys.map((k) => ({ private_key: k?.private_key, fingerprint: String(k?.fingerprint), generation: Number(k?.generation), active: k?.active === true }));
+    if (keys.some((k) => typeof k.private_key !== "string" || !Number.isFinite(k.generation))) throw new Error("shape");
+    if (keys.filter((k) => k.active).length !== 1) throw new Error("shape");
+    return { userId: payload.user_id, keys };
+  }
+  throw new Error("shape");
+}
+
+/** True when some signature in `signatures` verifies and was made by `key` (any of its key ids). */
+async function signedBy(signatures, key) {
+  const ids = key.getKeyIDs();
+  for (const sig of signatures) {
+    if (!ids.some((id) => id.equals(sig.keyID))) continue;
+    try {
+      if (await sig.verified) return true;
+    } catch {
+      // a bad signature does not count
+    }
+  }
+  return false;
+}
+
+/** Decrypts `sealed` with the device key and checks it was signed by EVERY key in `verificationKeys`. Returns the parsed payload. */
+async function openSigned({ sealed, devicePrivateKey, verificationKeys }) {
+  const openpgp = await loadOpenpgp();
+  const { data, signatures } = await openpgp.decrypt({
+    message: await openpgp.readMessage({ armoredMessage: sealed }),
+    decryptionKeys: await openpgp.readPrivateKey({ armoredKey: devicePrivateKey }),
+    verificationKeys,
+  });
+  for (const key of verificationKeys) if (!(await signedBy(signatures, key))) throw new Error("unsigned");
+  const parsed = parsePayload(JSON.parse(String(data)));
+  // Every key must really be the one its fingerprint claims.
+  for (const k of parsed.keys) {
+    const fp = (await openpgp.readPrivateKey({ armoredKey: k.private_key })).getFingerprint();
+    if (fp.toLowerCase() !== k.fingerprint.toLowerCase()) throw new Error("fingerprint");
+  }
+  return parsed;
+}
+
+const toResult = (parsed) => {
+  const active = parsed.keys.find((k) => k.active);
+  return {
+    privateKey: active.private_key,
+    retiredPrivateKeys: [...parsed.keys].filter((k) => !k.active).sort((a, b) => b.generation - a.generation).map((k) => k.private_key),
+    userId: parsed.userId,
+    generation: active.generation,
+    fingerprint: active.fingerprint,
+  };
+};
+
 /**
  * Opens the sealed key. The sealed key must be encrypted to this computer's key AND signed by the owner's key
  * (the public key is fetched with the linked token), the fingerprint inside must be the owner's, and when
- * `expectUserId` is given the user_id inside must be it. Returns `{ privateKey, userId }` (the armored owner
- * private key); throws LinkError kind "unlinked" on a 401 device_unlinked.
+ * `expectUserId` is given the user_id inside must be it. Returns `{ privateKey, retiredPrivateKeys, userId, generation }`
+ * (the armored active owner private key and the older generations of a v2 payload); throws LinkError kind "unlinked"
+ * on a 401 device_unlinked.
+ *
+ * `heldFingerprint` (the active key this computer verified when it stored the payload) lets a stored payload still open
+ * after the owner reset their key and before this computer picked the new one up: it is accepted when it is signed by
+ * that very key. A link file made before key resets recorded no such fingerprint: for a `storedLink` the payload's own
+ * active key stands in for it (it was verified when the link was made; the file is private to the user).
  */
-export async function openSealedKey({ host, fetchImpl = fetch, token, sealed_key, device_private_key, expectUserId }) {
+export async function openSealedKey({ host, fetchImpl = fetch, token, sealed_key, device_private_key, expectUserId, heldFingerprint, storedLink = false }) {
   let res;
   try {
     res = await fetchImpl(`${host.replace(/\/$/, "")}/api/v1/userkeys`, {
@@ -83,21 +148,46 @@ export async function openSealedKey({ host, fetchImpl = fetch, token, sealed_key
   try {
     const openpgp = await loadOpenpgp();
     const ownerKey = await openpgp.readKey({ armoredKey: ownerArmored });
-    const { data, signatures } = await openpgp.decrypt({
-      message: await openpgp.readMessage({ armoredMessage: sealed_key }),
-      decryptionKeys: await openpgp.readPrivateKey({ armoredKey: device_private_key }),
-      verificationKeys: ownerKey,
-    });
-    if (!signatures.length) throw new Error("unsigned");
-    await signatures[0].verified; // rejects on a bad signature
-    const payload = JSON.parse(String(data));
-    if (payload?.v !== 1 || typeof payload.private_key !== "string") throw new Error("shape");
-    if (String(payload.fingerprint).toLowerCase() !== ownerKey.getFingerprint().toLowerCase()) throw new Error("fingerprint");
-    if (expectUserId !== undefined && expectUserId !== null && String(payload.user_id) !== String(expectUserId)) throw new Error("user");
-    return { privateKey: payload.private_key, userId: payload.user_id };
+    let parsed;
+    try {
+      parsed = await openSigned({ sealed: sealed_key, devicePrivateKey: device_private_key, verificationKeys: [ownerKey] });
+      if (String(parsed.keys.find((k) => k.active).fingerprint).toLowerCase() !== ownerKey.getFingerprint().toLowerCase()) throw new Error("fingerprint");
+    } catch (err) {
+      // The owner reset their key and this computer has not picked it up yet: the stored payload is signed by the key
+      // it was stored under, not the server's new one.
+      if (!heldFingerprint && !storedLink) throw err;
+      const held = await openSigned({ sealed: sealed_key, devicePrivateKey: device_private_key, verificationKeys: [] });
+      const active = held.keys.find((k) => k.active);
+      if (heldFingerprint && active.fingerprint.toLowerCase() !== String(heldFingerprint).toLowerCase()) throw new Error("held");
+      const heldPublic = (await openpgp.readPrivateKey({ armoredKey: active.private_key })).toPublic();
+      parsed = await openSigned({ sealed: sealed_key, devicePrivateKey: device_private_key, verificationKeys: [heldPublic] });
+    }
+    if (expectUserId !== undefined && expectUserId !== null && String(parsed.userId) !== String(expectUserId)) throw new Error("user");
+    return toResult(parsed);
   } catch {
-    throw new LinkError("Couldn't trust the link: the key sent to this computer was not signed by your Salt key. Nothing was saved.", { kind: "verify" });
+    throw new LinkError(NOT_TRUSTED, { kind: "verify" });
   }
+}
+
+/**
+ * A v2 re-seal picked up after the owner reset their chat key. It must be encrypted to this computer's key, carry the
+ * signature of the generation this computer already holds (`held`, the armored held active private key) AND the
+ * signature of the new active key, name the same user, hold a newer active generation and still include the held key.
+ * A payload signed only by the new key is refused: Salt cannot plant a key of its own. Returns the same shape as
+ * openSealedKey; throws (generic) on any refusal.
+ */
+export async function openReseal({ sealed_key, device_private_key, heldPrivateKey, heldFingerprint, heldGeneration, expectUserId }) {
+  const openpgp = await loadOpenpgp();
+  const heldPublic = (await openpgp.readPrivateKey({ armoredKey: heldPrivateKey })).toPublic();
+  // First read without a signature requirement to learn the new key, then require both.
+  const peek = await openSigned({ sealed: sealed_key, devicePrivateKey: device_private_key, verificationKeys: [] });
+  const next = peek.keys.find((k) => k.active);
+  const newPublic = (await openpgp.readPrivateKey({ armoredKey: next.private_key })).toPublic();
+  const parsed = await openSigned({ sealed: sealed_key, devicePrivateKey: device_private_key, verificationKeys: [heldPublic, newPublic] });
+  if (String(parsed.userId) !== String(expectUserId)) throw new Error("user");
+  if (!parsed.keys.some((k) => k.fingerprint.toLowerCase() === String(heldFingerprint).toLowerCase())) throw new Error("held key missing");
+  if (!(next.generation > heldGeneration)) throw new Error("not newer");
+  return toResult(parsed);
 }
 
 /**
@@ -201,7 +291,9 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
       try {
         const body = await res.json();
         link = { v: 1, host: base, token: body.token, device_private_key: p.privateKey, sealed_key: body.sealed_key, user: body.user, linked_device: body.linked_device ?? { id: null, name: p.name }, linked_at: new Date(now()).toISOString() };
-        await openSealedKey({ host: base, fetchImpl: doFetch, token: link.token, sealed_key: link.sealed_key, device_private_key: link.device_private_key, expectUserId: link.user?.id ?? "" });
+        const opened = await openSealedKey({ host: base, fetchImpl: doFetch, token: link.token, sealed_key: link.sealed_key, device_private_key: link.device_private_key, expectUserId: link.user?.id ?? "" });
+        link.sealed_key_generation = opened.generation;
+        link.held_fingerprint = opened.fingerprint;
         if (pin && String(link.user?.handle ?? "").toLowerCase() !== pin) throw new Error("pin");
         await store(link);
         const shown = (v) => String(v ?? "").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").slice(0, 80);
@@ -274,6 +366,71 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
     }
   }
 
+  const sealedPath = `${base}/api/v1/linked_devices/self/sealed_key`;
+  const authed = (link, init = {}) => ({ ...init, headers: { Accept: "application/json", Authorization: `Bearer ${link.token}`, ...init.headers }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+
+  /** Tells Salt this computer holds the new generation (POST .../ack; DELETE on the sealed_key itself where that is the route). Best effort. */
+  async function ackPickup(link, generation) {
+    try {
+      let res = await doFetch(`${sealedPath}/ack`, authed(link, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generation }) }));
+      if (res.status === 404 || res.status === 405) res = await doFetch(sealedPath, authed(link, { method: "DELETE" }));
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Picks up a v2 re-seal after the owner reset their chat key. Resolves
+   *   { status: "none" }                      nothing waiting (or this computer already holds it: acked again)
+   *   { status: "picked_up", generation }     verified, stored (the link file's sealed key is replaced), acked
+   *   { status: "refused" }                   verification failed: nothing stored, nothing acked, the old key still reads
+   * and throws LinkError kind "unlinked" on 401 device_unlinked, kind "network" when Salt cannot be reached.
+   */
+  async function pickup(link) {
+    let res;
+    try {
+      res = await doFetch(sealedPath, authed(link));
+    } catch {
+      throw new LinkError("Couldn't reach Salt. Check the connection and try again.", { kind: "network" });
+    }
+    if (res.status === 401) {
+      const body = await res.json().catch(() => null);
+      if (body?.code === "device_unlinked") throw new LinkError("This computer was unlinked.", { status: 401, kind: "unlinked" });
+      throw new LinkError("Salt refused the link (401).", { status: 401, kind: "link" });
+    }
+    if (res.status === 204 || res.status === 404) return { status: "none" };
+    if (!res.ok) throw new LinkError(`Salt answered the key pickup with ${res.status}.`, { status: res.status, kind: "link" });
+    const body = await res.json().catch(() => null);
+    const sealed = body?.sealed_key;
+    if (typeof sealed !== "string" || !sealed) return { status: "none" };
+    const generation = Number(body.generation);
+    const held = Number(link.sealed_key_generation ?? 1);
+    if (Number.isFinite(generation) && generation <= held) {
+      await ackPickup(link, generation); // already held (an ack that did not land last time)
+      return { status: "none" };
+    }
+    try {
+      const current = await openSealedKey({ host: base, fetchImpl: doFetch, token: link.token, sealed_key: link.sealed_key, device_private_key: link.device_private_key, heldFingerprint: link.held_fingerprint, storedLink: true });
+      const next = await openReseal({
+        sealed_key: sealed,
+        device_private_key: link.device_private_key,
+        heldPrivateKey: current.privateKey,
+        heldFingerprint: current.fingerprint,
+        heldGeneration: held,
+        expectUserId: link.user?.id ?? "",
+      });
+      if (Number.isFinite(generation) && next.generation !== generation) throw new Error("generation");
+      const { device_private_key: key, ...rest } = link;
+      write({ ...rest, ...(link.key_store === "file" ? { device_private_key: key } : {}), sealed_key: sealed, sealed_key_generation: next.generation, held_fingerprint: next.fingerprint });
+      await ackPickup(link, next.generation);
+      return { status: "picked_up", generation: next.generation };
+    } catch (err) {
+      if (err instanceof LinkError && err.kind !== "verify") throw err;
+      return { status: "refused" };
+    }
+  }
+
   return {
     path: file,
     read,
@@ -291,6 +448,7 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
     get linking() {
       return pending !== null;
     },
-    open: (link) => openSealedKey({ host: base, fetchImpl: doFetch, token: link.token, sealed_key: link.sealed_key, device_private_key: link.device_private_key }),
+    open: (link) => openSealedKey({ host: base, fetchImpl: doFetch, token: link.token, sealed_key: link.sealed_key, device_private_key: link.device_private_key, heldFingerprint: link.held_fingerprint, storedLink: true }),
+    pickup,
   };
 }

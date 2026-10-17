@@ -170,8 +170,20 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     return res.json();
   }
 
+  // A 409 pickup_required: the owner reset their chat key and this computer has not picked the new one up. Pick it up
+  // and send again, once.
+  async function pickupThenRetry(res) {
+    if (!linkMode || res.status !== 409 || (await res.clone().json().catch(() => null))?.code !== "pickup_required") return null;
+    const link = await loadLinked();
+    const status = await pickUpLinked(link);
+    if (status !== "picked_up") return null;
+    await openLinked((await linkClient.load()) ?? link);
+    return true;
+  }
+
   async function postJson(path, body, headers) {
-    const res = await request("POST", path, { body, headers });
+    let res = await request("POST", path, { body, headers });
+    if (await pickupThenRetry(res)) res = await request("POST", path, { body, headers });
     if (!res.ok) {
       let detail = "";
       try {
@@ -196,7 +208,10 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
   }
 
   // Link mode: the stored link, or a new one started (which asks the owner to scan it, so this throws).
-  async function unlockLinked() {
+  // After the owner resets their chat key the phone re-seals the new keyring to this computer: it is picked up here
+  // (checked, stored, acknowledged) before the key is opened. A pickup that fails or is refused is not fatal: the held
+  // key still reads old history.
+  async function loadLinked() {
     let link;
     try {
       link = await linkClient.load();
@@ -206,16 +221,38 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     if (!link) await relink();
     token = `Bearer ${link.token}`;
     user = { id: link.user?.id ?? null, username: link.user?.handle ?? null, display_name: link.user?.name ?? null };
-    let armored;
+    return link;
+  }
+
+  async function openLinked(link) {
+    let opened;
     try {
-      armored = (await linkClient.open(link)).privateKey;
+      opened = await linkClient.open(link);
     } catch (err) {
       if (err?.kind === "unlinked") await relink();
       throw asMeError(err);
     }
     lockMode = "link";
-    privateKey = await openPrivateKey(armored);
-    decryptText = createMessageDecryptor(privateKey);
+    privateKey = await openPrivateKey(opened.privateKey);
+    const retired = [];
+    for (const armored of opened.retiredPrivateKeys ?? []) retired.push(await openPrivateKey(armored).catch(() => null));
+    const ring = retired.filter(Boolean);
+    decryptText = createMessageDecryptor(ring.length ? [privateKey, ...ring] : privateKey);
+  }
+
+  async function pickUpLinked(link) {
+    try {
+      return (await linkClient.pickup(link)).status;
+    } catch (err) {
+      if (err?.kind === "unlinked") await relink();
+      return "error";
+    }
+  }
+
+  async function unlockLinked() {
+    const link = await loadLinked();
+    await pickUpLinked(link);
+    await openLinked((await linkClient.load()) ?? link);
   }
 
   async function unlock() {
