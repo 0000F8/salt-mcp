@@ -339,7 +339,8 @@ test("send validates: empty text, over-long text, unknown mention, bad chat id",
   const world = await makeWorld();
   const h = handlersFor(world);
   await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "   " }), /text is required/);
-  await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "x".repeat(1001) }), /limited to 1000 characters and 20 lines/);
+  await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "x".repeat(20001) }), /limited to 20000 characters/);
+  await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_OPEN, text: "x".repeat(4001) }), /limited to 4000 characters/);
   await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "hi", mentions: ["@nobody"] }), /not in that chat/);
   await assert.rejects(h.callTool("salt_me_send", { chat_id: "x/../y", text: "hi" }), /plain Salt id/);
   assert.equal(world.posted.length, 0);
@@ -537,10 +538,8 @@ test("send refuses text that could look different from what is sent", async () =
     "tag\u0000nul",
     "line\u2028separator",
     "bom\uFEFFhere",
-    "ok" + "\n".repeat(60) + "hidden payload",
-    "x".repeat(1001),
   ];
-  for (const text of bad) await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text }), /hidden or control characters|limited to 1000/, JSON.stringify(text.slice(0, 20)));
+  for (const text of bad) await assert.rejects(h.callTool("salt_me_send", { chat_id: CHAT_ADA, text }), /hidden or control characters/, JSON.stringify(text.slice(0, 20)));
   assert.equal(world.posted.length, 0);
 });
 
@@ -550,4 +549,13 @@ test("send: tabs and ordinary newlines are fine; CRLF is normalised", async () =
   await h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "line one\r\n\tindented\rthree" });
   assert.equal(await decryptWith(world.keys.ada.privateKey, world.posted[0].body.message), "line one\n\tindented\nthree");
   assert.equal(await decryptWith(world.keys.me.privateKey, world.posted[0].body.message), "line one\n\tindented\nthree");
+});
+
+test("send limits follow Salt: 20000 characters encrypted, 4000 in an open room, no line limit", async () => {
+  const world = await makeWorld();
+  const h = handlersFor(world);
+  await h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: "x".repeat(20000) });
+  await h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: Array(200).fill("line").join("\n") });
+  await h.callTool("salt_me_send", { chat_id: CHAT_OPEN, text: "y".repeat(4000) });
+  assert.equal(world.posted.length, 3);
 });
