@@ -196,7 +196,12 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
 
   // Link mode: the stored link, or a new one started (which asks the owner to scan it, so this throws).
   async function unlockLinked() {
-    const link = await linkClient.load();
+    let link;
+    try {
+      link = await linkClient.load();
+    } catch (err) {
+      throw asMeError(err);
+    }
     if (!link) await relink();
     token = `Bearer ${link.token}`;
     user = { id: link.user?.id ?? null, username: link.user?.handle ?? null, display_name: link.user?.name ?? null };
@@ -282,6 +287,11 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     },
     signOut,
     ensureUnlocked,
+    /** In link mode: `Linked to Salt as @handle.` once, for the first tool result after a link; else null. */
+    takeLinkedNote: () => {
+      const j = linkMode ? linkClient.takeLinked() : null;
+      return j ? `Linked to Salt as @${j.handle}.` : null;
+    },
     /** Reads and writes sign in and unlock first, so a tool never reaches Salt without the key being ready. */
     get: async (path) => (await ensureUnlocked(), getJson(path)),
     getBytes: async (path, maxBytes) => (await ensureUnlocked(), getBytes(path, maxBytes)),

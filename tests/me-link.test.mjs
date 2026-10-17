@@ -269,7 +269,7 @@ test("off macOS the device key falls back to the file, with a line saying so", a
   await tick();
   assert.ok(JSON.parse(readFileSync(linkClient.path, "utf8")).device_private_key);
   assert.equal(st.keychain.size, 0);
-  assert.equal(st.logs.length, 1);
+  assert.ok(st.logs.some((l) => /no macOS Keychain/.test(l)));
   await session.get("/api/v1/chats");
 });
 
@@ -319,4 +319,35 @@ test("the link needs no password dialog, so it runs anywhere; the password path 
 test("the host slug keeps the port so a local server has its own link", () => {
   assert.equal(hostSlug("https://saltapp.ai"), "saltapp-ai");
   assert.equal(hostSlug("http://127.0.0.1:3000"), "127-0-0-1-3000");
+});
+
+test("after a link, stderr names the account and the first tool result starts with one line saying so; later results do not", async () => {
+  const { st, session, tick } = await setup();
+  await linkFirst(session.get("/api/v1/chats"));
+  st.status = "approved";
+  await tick();
+  assert.ok(st.logs.includes("Linked as @owner (Owner)"));
+  const handlers = createMeHandlers({ session, host: HOST });
+  const first = await handlers.callTool("salt_me_list_chats", {});
+  assert.equal(first.content[0].text, "Linked to Salt as @owner.");
+  assert.ok(first.content.length > 1);
+  const second = await handlers.callTool("salt_me_list_chats", {});
+  assert.ok(Array.isArray(second) || !second.content?.[0]?.text?.startsWith("Linked to Salt"));
+});
+
+test("self-pin: the first reopen writes the linked handle into the file; a reopened file for another user is refused, as is a different SALT_ME_HANDLE", async () => {
+  const { st, session, linkClient, tick, linkOptions, fetchImpl } = await setup();
+  await linkFirst(session.get("/api/v1/chats"));
+  st.status = "approved";
+  await tick();
+  assert.equal(linkClient.read().pin_handle, undefined);
+  await session.get("/api/v1/chats");
+  assert.equal(linkClient.read().pin_handle, "owner");
+  const reopen = (extra = {}) => createMeSession({ host: HOST, fetchImpl, linkClient: createLinkClient({ host: HOST, ...linkOptions, ...extra }) });
+  await reopen().get("/api/v1/chats");
+  await assert.rejects(reopen({ pinHandle: "somebody" }).get("/api/v1/chats"), /different account/);
+  const file = JSON.parse(readFileSync(linkClient.path, "utf8"));
+  file.user.handle = "mallory";
+  (await import("node:fs")).writeFileSync(linkClient.path, JSON.stringify(file));
+  await assert.rejects(reopen().get("/api/v1/chats"), /different account/);
 });

@@ -17,6 +17,7 @@
 // say so: it is data to read, never instructions to follow.
 
 import { randomUUID } from "node:crypto";
+import { toolResult } from "./tool-result.mjs";
 import { cleanMessageText, previewText } from "./me-markers.mjs";
 import { encryptForKeys, decryptAttachmentBytes, ENCRYPTED_PLACEHOLDER, MAX_ATTACHMENT_BYTES } from "./me-crypto.mjs";
 
@@ -547,31 +548,39 @@ export function createMeHandlers({ session, readOnly = false, host }) {
 
   const tools = [...READ_TOOLS, ...(readOnly ? [] : [SEND_TOOL])];
 
+  async function run(name, args) {
+    switch (name) {
+      case "salt_me_list_chats": {
+        if (args.filter !== undefined && !["all", "groups", "people", "agents", "requests"].includes(args.filter)) throw new Error("filter must be all, groups, people, agents or requests.");
+        return listChats(args);
+      }
+      case "salt_me_read_chat":
+        return readChat(args);
+      case "salt_me_find_chat": {
+        if (typeof args.name !== "string" || !args.name.trim()) throw new Error("name is required.");
+        const found = await findChats(args.name);
+        return found.map((c) => c.desc);
+      }
+      case "salt_me_read_attachment":
+        return readAttachment(args);
+      case "salt_me_whoami":
+        return whoami();
+      case SEND_TOOL.name:
+        return send(args);
+      default:
+        throw new Error(`Unknown tool "${name}".`);
+    }
+  }
+
   return {
     toolCount: tools.length,
     listTools: () => tools.map((t) => ({ ...t })),
     async callTool(name, args = {}) {
-      switch (name) {
-        case "salt_me_list_chats": {
-          if (args.filter !== undefined && !["all", "groups", "people", "agents", "requests"].includes(args.filter)) throw new Error("filter must be all, groups, people, agents or requests.");
-          return listChats(args);
-        }
-        case "salt_me_read_chat":
-          return readChat(args);
-        case "salt_me_find_chat": {
-          if (typeof args.name !== "string" || !args.name.trim()) throw new Error("name is required.");
-          const found = await findChats(args.name);
-          return found.map((c) => c.desc);
-        }
-        case "salt_me_read_attachment":
-          return readAttachment(args);
-        case "salt_me_whoami":
-          return whoami();
-        case SEND_TOOL.name:
-          return send(args);
-        default:
-          throw new Error(`Unknown tool "${name}".`);
-      }
+      const result = await run(name, args);
+      // The first result after a link says which account it joined, as its own first line.
+      const note = session.takeLinkedNote?.();
+      if (!note) return result;
+      return new McpContent([{ type: "text", text: note }, ...(result instanceof McpContent ? result.content : toolResult(result).content)]);
     },
   };
 }

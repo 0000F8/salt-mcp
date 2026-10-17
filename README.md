@@ -688,10 +688,14 @@ Then ask Claude things like "what did Ada say in the Launch crew chat?" or
 **The file is readable by any program running as you**, an AI with a shell
 included. With the token such a program can **read your chats and send as you,
 to people and to your agents.** It cannot touch your wallets, money, settings,
-keys or sign-in, and your Salt password is never typed or kept. **If you did
-not link this computer yourself, unlink it from your phone (Connections) and
-change your password.** `SALT_ME_HANDLE=<your handle>` makes the server refuse
-a link approved by any other account, and a link whose key does not check out
+keys or sign-in, and your Salt password is never typed or kept. The Keychain keeps the key out of backups and out of plain files, but **any
+program running as you can still read it**, and the token in the file can send
+as you. Unlinking from your phone (Connections) cuts this computer off from
+Salt. **If you did not link it yourself, or you think it was misused, unlink it
+and change your password.** After linking, salt-mcp says "Linked as @handle" on
+stderr and your AI's first answer starts with "Linked to Salt as @handle." so
+you can see which account it joined. `SALT_ME_HANDLE=<your handle>` makes the server refuse
+a link approved by any other account (without it, the first reopen pins the linked handle in the file), and a link whose key does not check out
 (wrong signature, wrong account) is refused, saved nowhere and cancelled at
 once.
 

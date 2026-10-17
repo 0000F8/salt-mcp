@@ -16,10 +16,17 @@
 //             key, the user and the linked device. A program running as you can read it, and with the token it can
 //             read your chats and send as you (to people and to your agents), but never reach wallets, money,
 //             settings, keys or the vault. Cancel it from the phone (Connections) or with `--unlink`.
+//   who       after a link, stderr says "Linked as @handle (name)" and the first tool result starts with
+//             "Linked to Salt as @handle." so the person sees which account it joined. The first reopen of a link
+//             with no SALT_ME_HANDLE writes the linked handle into the file as the pin, and a reopened file whose
+//             user is not the pin is refused.
 //   the key   the device PRIVATE key is not in that file: on macOS it is in the login Keychain (generic password,
 //             service "salt-mcp-link", account <host-slug>), written through `security -i` with the command on
 //             STDIN and read back with `security find-generic-password -w`, so it is never on a command line.
-//             Elsewhere it falls back to the file, and a line on stderr says so.
+//             Elsewhere it falls back to the file, and a line on stderr says so. The Keychain keeps the key out of
+//             backups and out of plain files, but any program running as you can still read it, and the token in
+//             the file can send as you. Unlinking from your phone cuts this computer off from Salt; if you think
+//             it was misused, unlink it and change your password.
 //
 // No token, key or sealed key is logged or put in an error message.
 
@@ -130,7 +137,8 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
   const slug = hostSlug(base);
   const onMac = platform === "darwin";
   const pin = pinHandle ? String(pinHandle).trim().replace(/^@/, "").toLowerCase() : null;
-  let pending = null; // { id, pollSecret, expiresAt, url, opened, timer, privateKey, name }
+  let pending = null;
+  let justLinked = null; // { handle, name } until the first tool result has said so // { id, pollSecret, expiresAt, url, opened, timer, privateKey, name }
 
   /** The stored link, or null when there is none (or it is not one of ours). */
   function read() {
@@ -165,7 +173,13 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
   /** The stored link with its device private key (from the Keychain when it lives there), or null if either is gone. */
   async function load() {
     const link = read();
-    if (!link || link.device_private_key) return link;
+    if (!link) return null;
+    // Self-pin: the pinned handle (SALT_ME_HANDLE, else the one written on the first reopen) must be the link's user.
+    const handle = String(link.user?.handle ?? "").toLowerCase();
+    const wanted = pin ?? link.pin_handle ?? null;
+    if (wanted && handle !== wanted) throw new LinkError("This link belongs to a different account than the one this computer is pinned to. Run --unlink, then link again.", { kind: "pin" });
+    if (!wanted && handle) write({ ...link, pin_handle: handle });
+    if (link.device_private_key) return link;
     const key = await keychainGet();
     return key ? { ...link, device_private_key: key } : null;
   }
@@ -217,6 +231,9 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
         await openSealedKey({ host: base, fetchImpl: doFetch, token: link.token, sealed_key: link.sealed_key, device_private_key: link.device_private_key, expectUserId: link.user?.id ?? "" });
         if (pin && String(link.user?.handle ?? "").toLowerCase() !== pin) throw new Error("pin");
         await store(link);
+        const shown = (v) => String(v ?? "").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "").slice(0, 80);
+        justLinked = { handle: shown(link.user?.handle) };
+        log(`Linked as @${justLinked.handle} (${shown(link.user?.name)})`);
       } catch {
         // Refused: nothing is stored, and the token just issued is cancelled so it cannot be used by anyone.
         if (link?.token) await unlinkRemote(link);
@@ -297,6 +314,12 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
     begin,
     cancel,
     unlinkRemote,
+    /** The account just linked, once; null after that. */
+    takeLinked() {
+      const j = justLinked;
+      justLinked = null;
+      return j;
+    },
     get linking() {
       return pending !== null;
     },
