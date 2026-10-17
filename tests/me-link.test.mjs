@@ -6,10 +6,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
 import { join } from "node:path";
 import { loadOpenpgp } from "../src/local-decrypt.mjs";
 import { createMeSession } from "../src/me-session.mjs";
 import { createMeHandlers } from "../src/me-tools.mjs";
+import { renderLinkPage } from "../src/link-store.mjs";
 import { createLinkClient, hostSlug, LINK_FIRST, POLL_MS } from "../src/me-link.mjs";
 import { checkPlatform, runAsMe } from "../src/me-cli.mjs";
 import { makeWorld, HOST, CHAT_ADA, ME_ID } from "./me-fixtures.mjs";
@@ -22,7 +25,7 @@ async function setup({ sealWith, sealedFingerprint, sealedUserId = ME_ID, pinHan
   const world = await makeWorld();
   const openpgp = await loadOpenpgp();
   const baseDir = join(mkdtempSync(join(tmpdir(), "salt-link-")), "salt-mcp");
-  const st = { keychain: new Map(), commands: [], logs: [], links: 0, status: "pending", devicePublicKey: null, unlinked: false, calls: [], deleted: [], opened: [], timers: [], clock: 1_000_000 };
+  const st = { keychain: new Map(), commands: [], logs: [], links: 0, status: "pending", devicePublicKey: null, unlinked: false, calls: [], deleted: [], opened: [], pages: [], timers: [], clock: 1_000_000 };
 
   async function seal() {
     const signer = await openpgp.readPrivateKey({ armoredKey: (sealWith ?? world.keys.me).privateKey });
@@ -90,7 +93,7 @@ async function setup({ sealWith, sealedFingerprint, sealedUserId = ME_ID, pinHan
   const linkOptions = {
     pinHandle, runCommand, platform, log: (m) => st.logs.push(m),
     baseDir, hostname: "Test-Mac", fetchImpl,
-    openBrowser: async (url) => { st.opened.push(url); },
+    openBrowser: async (url) => { st.opened.push(url); const f = fileURLToPath(url); st.pages.push({ html: readFileSync(f, "utf8"), fileMode: statSync(f).mode & 0o777, dirMode: statSync(dirname(f)).mode & 0o777 }); },
     setTimer: (fn, ms) => { st.timers.push({ fn, ms }); return st.timers.length; },
     clearTimer: () => {},
     now: () => st.clock,
@@ -108,12 +111,19 @@ test("first use opens the code page and returns at once; a second call reuses th
   const { st, session } = await setup();
   await linkFirst(session.get("/api/v1/chats"));
   assert.equal(st.opened.length, 1);
-  const url = new URL(st.opened[0]);
-  assert.equal(`${url.origin}${url.pathname}`, `${HOST}/link/show`);
-  const frag = new URLSearchParams(url.hash.slice(1));
-  assert.equal(frag.get("id"), "link-1");
-  assert.match(frag.get("fp"), /^[0-9a-f]{40}$/i);
-  assert.equal(frag.get("name"), "Claude on Test-Mac");
+  assert.match(st.opened[0], /^file:\/\/\/.*salt-link-[^/]+\/link\.html$/);
+  assert.ok(!st.opened[0].includes("/link/show"), "no web page of Salt draws the code");
+  const page = st.pages[0];
+  assert.equal(page.fileMode, 0o600);
+  assert.equal(page.dirMode, 0o700);
+  assert.match(page.html, /<svg/);
+  assert.match(page.html, /<title>Link this computer<\/title>/);
+  assert.match(page.html, /Claude on Test-Mac/);
+  assert.match(page.html, /On your phone, open Salt's menu, tap Devices, then Link a computer, and scan this\./);
+  assert.ok(!page.html.includes(TOKEN) && !page.html.includes("poll-secret") && !page.html.includes("PRIVATE KEY"));
+  // The code carries {host}/link/<id>/<fp>: decode-free check by re-rendering the same value.
+  const fp = (await (await loadOpenpgp()).readKey({ armoredKey: st.devicePublicKey })).getFingerprint();
+  assert.equal(page.html, renderLinkPage({ value: `${HOST}/link/link-1/${fp}`, name: "Claude on Test-Mac" }));
   await linkFirst(session.get("/api/v1/chats"));
   assert.equal(st.links, 1, "no second link was started");
   assert.equal(st.opened.length, 1);
@@ -350,4 +360,24 @@ test("self-pin: the first reopen writes the linked handle into the file; a reope
   file.user.handle = "mallory";
   (await import("node:fs")).writeFileSync(linkClient.path, JSON.stringify(file));
   await assert.rejects(reopen().get("/api/v1/chats"), /different account/);
+});
+
+test("the code page's temp dir is deleted when the link reaches a final state; an open failure puts the path in stderr and the message", async () => {
+  const { st, session, tick, linkOptions } = await setup();
+  await linkFirst(session.get("/api/v1/chats"));
+  const dir = dirname(fileURLToPath(st.opened[0]));
+  assert.ok(existsSync(dir));
+  st.status = "denied";
+  await tick();
+  assert.equal(existsSync(dir), false);
+
+  const failing = await setup();
+  failing.linkOptions.openBrowser = async () => { throw new Error("no browser"); };
+  const client = createLinkClient({ host: HOST, ...failing.linkOptions });
+  const started = await client.begin();
+  assert.equal(started.opened, false);
+  assert.ok(existsSync(started.url) && started.url.endsWith("link.html"));
+  assert.ok(failing.st.logs.some((l) => l.includes(started.url)));
+  client.cancel();
+  assert.equal(existsSync(started.url), false);
 });

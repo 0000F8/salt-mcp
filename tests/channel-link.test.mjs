@@ -5,7 +5,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { renderLinkPage } from "../src/link-store.mjs";
 import { loadOpenpgp } from "../src/local-decrypt.mjs";
 import { createChannelLink, channelLinkEnv, isChannelLinkMode, runChannelUnlink, KEY_PASSPHRASE } from "../src/channel-link.mjs";
 import { loadChannelConfig } from "../src/channel.mjs";
@@ -19,7 +21,7 @@ const json = (body, status = 200) => new Response(JSON.stringify(body), { status
 
 function setup({ pendingPolls = 2, finalStatus = 200, platform = "darwin", claimBody } = {}) {
   const baseDir = join(mkdtempSync(join(tmpdir(), "salt-chlink-")), "salt-mcp");
-  const st = { calls: [], created: null, polls: 0, opened: [], logs: [], commands: [], keychain: new Map() };
+  const st = { calls: [], created: null, polls: 0, opened: [], pages: [], logs: [], commands: [], keychain: new Map() };
   const fetchImpl = async (url, init = {}) => {
     const path = new URL(url).pathname;
     const method = init.method || "GET";
@@ -56,7 +58,7 @@ function setup({ pendingPolls = 2, finalStatus = 200, platform = "darwin", claim
   const linkOptions = {
     baseDir, hostname: "Test-Mac", fetchImpl, runCommand, platform,
     log: (m) => st.logs.push(m),
-    openBrowser: async (url) => { st.opened.push(url); },
+    openBrowser: async (url) => { st.opened.push(url); const f = fileURLToPath(url); st.pages.push({ html: readFileSync(f, "utf8"), fileMode: statSync(f).mode & 0o777, dirMode: statSync(dirname(f)).mode & 0o777, dir: dirname(f) }); },
     sleep: async () => {},
     now: () => 1_000_000,
   };
@@ -85,7 +87,15 @@ test("a scan makes the agent: kind agent request, QR page opened, polled, secret
   assert.equal(st.opened.length, 1);
   const openpgp = await loadOpenpgp();
   const fp = (await openpgp.readKey({ armoredKey: st.created.public_key })).getFingerprint();
-  assert.equal(st.opened[0], `${HOST}/link/show#id=link-1&fp=${fp}&name=${encodeURIComponent("Claude Code on Test-Mac")}`);
+  assert.match(st.opened[0], /^file:\/\/\/.*salt-link-[^/]+\/link\.html$/);
+  assert.ok(!st.opened[0].includes("/link/show"));
+  const page = st.pages[0];
+  assert.equal(page.fileMode, 0o600);
+  assert.equal(page.dirMode, 0o700);
+  assert.match(page.html, /<svg/);
+  assert.equal(page.html, renderLinkPage({ value: `${HOST}/link/link-1/${fp}`, name: "Claude Code on Test-Mac" }));
+  assert.ok(!page.html.includes(API_KEY) && !page.html.includes("poll-secret"));
+  assert.equal(existsSync(page.dir), false, "the temp dir is deleted once the link is final");
   assert.equal(linked.agent.id, AGENT.id);
 
   // The private key belongs to the public key sent, and opens with the SDK passphrase.

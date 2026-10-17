@@ -5,7 +5,7 @@
 //            SALT_API_KEY set the env path is untouched.
 //   begin    make the agent's own PGP keypair HERE (the SDK's generateKeypair, so the key decrypts exactly as the
 //            SDK expects), POST /api/v1/device_links {kind:"agent", public_key, name:"Claude Code on <host>",
-//            agent_name:"Claude Code"}, open {host}/link/show#id=&fp=&name= in the browser and poll
+//            agent_name:"Claude Code"}, show a local QR page (link-store.mjs showLinkPage, deleted when the link ends) and poll
 //            POST /device_links/:id/claim every 3 s until approved, denied, expired or claimed. The phone approves
 //            with no key moving: this public key BECOMES the agent's, and its private key never leaves this
 //            computer. Salt never holds it.
@@ -24,7 +24,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import pkg from "salt-agent-sdk";
-import { createKeychain, defaultBaseDir, defaultOpen, defaultRunCommand, hostSlug, writePrivateJson } from "./link-store.mjs";
+import { createKeychain, defaultBaseDir, defaultOpen, defaultRunCommand, hostSlug, showLinkPage, writePrivateJson } from "./link-store.mjs";
 import { LinkError, POLL_MS } from "./me-link.mjs";
 import { DEFAULT_HOST } from "./me-session.mjs";
 import { assertSafeHost } from "./me-cli.mjs";
@@ -120,38 +120,37 @@ export function createChannelLink({
     if (res.status === 429) throw new LinkError("Salt is rate limiting new links. Wait a while and try again.", { status: 429, kind: "rate_limit" });
     if (res.status !== 201) throw new LinkError(`Salt answered the link request with ${res.status}.`, { status: res.status, kind: "link" });
     const made = await res.json();
-    const url = `${base}/link/show#id=${encodeURIComponent(made.id)}&fp=${encodeURIComponent(fingerprint)}&name=${encodeURIComponent(name)}`;
     const expiresAt = Date.parse(made.expires_at) || now() + 15 * 60000;
+    const page = await showLinkPage({ host: base, id: made.id, fp: fingerprint, name, openBrowser, log });
+    if (page.opened) log("Scan the code in your browser with the Salt app on your phone (Menu, Devices, Link a computer) to make the agent.");
     try {
-      await openBrowser(url);
-      log("Scan the code in your browser with the Salt app on your phone (Menu, Devices, Link a computer) to make the agent.");
-    } catch {
-      log(`Open this page and scan the code with the Salt app on your phone: ${url}`);
-    }
-    for (;;) {
-      let claim = null;
-      try {
-        claim = await doFetch(`${base}/api/v1/device_links/${encodeURIComponent(made.id)}/claim`, {
-          method: "POST",
-          headers: { Accept: "application/json", "Content-Type": "application/json" },
-          body: JSON.stringify({ poll_secret: made.poll_secret }),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-        });
-      } catch {
-        claim = null; // a network blip: try again until the link's own expiry
-      }
-      if (claim?.status === 200) {
-        const body = await claim.json().catch(() => null);
-        if (typeof body?.api_key !== "string" || !body.api_key || !body.agent?.id || !body.owner?.id) {
-          throw new LinkError("Salt's answer to the link was incomplete. Nothing was saved; delete the new agent in Salt (Developers) and try again.", { kind: "link" });
+      for (;;) {
+        let claim = null;
+        try {
+          claim = await doFetch(`${base}/api/v1/device_links/${encodeURIComponent(made.id)}/claim`, {
+            method: "POST",
+            headers: { Accept: "application/json", "Content-Type": "application/json" },
+            body: JSON.stringify({ poll_secret: made.poll_secret }),
+            signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+          });
+        } catch {
+          claim = null; // a network blip: try again until the link's own expiry
         }
-        const linked = { v: 1, host: base, agent: body.agent, owner: body.owner, public_key: publicKey, api_key: body.api_key, private_key: privateKey, linked_at: new Date(now()).toISOString() };
-        await store(linked);
-        return linked;
+        if (claim?.status === 200) {
+          const body = await claim.json().catch(() => null);
+          if (typeof body?.api_key !== "string" || !body.api_key || !body.agent?.id || !body.owner?.id) {
+            throw new LinkError("Salt's answer to the link was incomplete. Nothing was saved; delete the new agent in Salt (Developers) and try again.", { kind: "link" });
+          }
+          const linked = { v: 1, host: base, agent: body.agent, owner: body.owner, public_key: publicKey, api_key: body.api_key, private_key: privateKey, linked_at: new Date(now()).toISOString() };
+          await store(linked);
+          return linked;
+        }
+        if (claim && (claim.status === 410 || claim.status === 404)) throw new LinkError("The link was denied, expired or already used. Run it again for a new code.", { status: claim.status, kind: "link" });
+        if (now() >= expiresAt) throw new LinkError("The code ran out (they last 15 minutes). Run it again for a new one.", { kind: "link" });
+        await sleep(POLL_MS);
       }
-      if (claim && (claim.status === 410 || claim.status === 404)) throw new LinkError("The link was denied, expired or already used. Run it again for a new code.", { status: claim.status, kind: "link" });
-      if (now() >= expiresAt) throw new LinkError("The code ran out (they last 15 minutes). Run it again for a new one.", { kind: "link" });
-      await sleep(POLL_MS);
+    } finally {
+      page.cleanup();
     }
   }
 

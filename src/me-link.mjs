@@ -3,7 +3,8 @@
 // this computer made. The server only ever sees ciphertext. Contract: worktrees/DEVICE_LINK_CONTRACT.md.
 //
 //   begin     make an openpgp curve25519 keypair, POST /api/v1/device_links {public_key,name}, open
-//             {host}/link/show#id=&fp=&name= in the browser (/usr/bin/open, args array), then poll
+//             a local page (src/link-store.mjs showLinkPage: an inline-SVG QR of {host}/link/<id>/<fp>, in a 0700 temp dir,
+//             deleted when the link ends or the process exits) in the browser (/usr/bin/open, args array), then poll
 //             POST /device_links/:id/claim every 3 s in the background until approved, denied, expired or claimed.
 //   claim     200 {token:"sld_...", sealed_key, user, linked_device} arrives once. Before anything is stored the
 //             sealed key is opened and checked (see open): a key that is not signed by the owner's key, or whose
@@ -34,7 +35,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import { loadOpenpgp } from "./local-decrypt.mjs";
-import { createKeychain, defaultBaseDir, defaultOpen, defaultRunCommand, defaultSetTimer, hostSlug, writePrivateJson } from "./link-store.mjs";
+import { createKeychain, defaultBaseDir, defaultOpen, defaultRunCommand, defaultSetTimer, hostSlug, showLinkPage, writePrivateJson } from "./link-store.mjs";
 
 export { defaultBaseDir, hostSlug };
 
@@ -119,6 +120,12 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
   let pending = null;
   let justLinked = null; // { handle, name } until the first tool result has said so // { id, pollSecret, expiresAt, url, opened, timer, privateKey, name }
 
+  /** Ends the link in progress for good: forgets it and deletes its code page. */
+  function finish(p) {
+    p?.page?.cleanup();
+    if (pending === p) pending = null;
+  }
+
   /** The stored link, or null when there is none (or it is not one of ours). */
   function read() {
     try {
@@ -189,7 +196,7 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
     const res = await claim(p);
     if (pending !== p) return;
     if (res?.status === 200) {
-      pending = null;
+      finish(p);
       let link = null;
       try {
         const body = await res.json();
@@ -207,11 +214,11 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
       return;
     }
     if (res && (res.status === 410 || res.status === 404)) {
-      pending = null;
+      finish(p);
       return;
     }
     if (now() >= p.expiresAt) {
-      pending = null;
+      finish(p);
       return;
     }
     p.timer = setTimer(() => poll(p), POLL_MS);
@@ -238,22 +245,17 @@ export function createLinkClient({ host, fetchImpl, baseDir = defaultBaseDir(), 
     if (res.status === 429) throw new LinkError("Salt is rate limiting new links. Wait a while and try again.", { status: 429, kind: "rate_limit" });
     if (res.status !== 201) throw new LinkError(`Salt answered the link request with ${res.status}.`, { status: res.status, kind: "link" });
     const made = await res.json();
-    const url = `${base}/link/show#id=${encodeURIComponent(made.id)}&fp=${encodeURIComponent(fingerprint)}&name=${encodeURIComponent(name)}`;
-    const p = { id: made.id, pollSecret: made.poll_secret, expiresAt: Date.parse(made.expires_at) || now() + 15 * 60000, url, opened: true, timer: null, privateKey, name };
-    try {
-      await openBrowser(url);
-    } catch {
-      p.opened = false;
-    }
+    const page = await showLinkPage({ host: base, id: made.id, fp: fingerprint, name, openBrowser, log });
+    const p = { id: made.id, pollSecret: made.poll_secret, expiresAt: Date.parse(made.expires_at) || now() + 15 * 60000, url: page.file, opened: page.opened, page, timer: null, privateKey, name };
     pending = p;
     p.timer = setTimer(() => poll(p), POLL_MS);
-    return { url, opened: p.opened };
+    return { url: page.file, opened: page.opened };
   }
 
   /** Cancels the link in progress, if any. */
   function cancel() {
     if (pending?.timer) clearTimer(pending.timer);
-    pending = null;
+    finish(pending);
   }
 
   /** DELETE the linked device with its own token (self-unlink). Best effort; the local file is the caller's to remove. */

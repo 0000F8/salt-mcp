@@ -544,7 +544,7 @@ claude --dangerously-load-development-channels server:salt   # with: "args": ["-
 ```
 
 The first start generates the agent's PGP key **on this computer**, opens a page
-with a code, and waits. In the Salt app go to Menu, Devices, Link a computer,
+with a code (drawn by salt-mcp itself, in a private temp file that is deleted when the link ends), and waits. In the Salt app go to Menu, Devices, Link a computer,
 scan it, and approve "Make an agent called Claude Code?" (nothing moves but the
 agent's public key; Salt never holds the private key). The new agent is called
 "Claude Code" and belongs to you. Its api key and private key go in your login
@@ -676,8 +676,10 @@ claude mcp add salt-me -- node /path/to/salt-mcp/src/index.mjs --as-me
 ```
 
 **Linking.** The first time your AI asks for a chat, a page with a code opens in
-your browser: "Link this computer". Scan it with your phone's camera, check the
-name ("Claude on <your Mac>") and tap Link. Your AI is told to try again, and
+your browser: "Link this computer". salt-mcp draws the code itself, in a private
+temp file that is deleted when the link ends (if no browser opens, the message
+gives the file's path). On your phone open Salt's menu, tap Devices, then Link a
+computer, and scan it; check the name ("Claude on <your Mac>") and tap Link. Your AI is told to try again, and
 the next try works. A code lasts 15 minutes; if it runs out, the next request
 opens a new one. The link lasts until you unlink it, like WhatsApp.
 
