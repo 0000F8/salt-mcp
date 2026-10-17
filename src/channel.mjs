@@ -35,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import pkg from "salt-agent-sdk";
+import { buildGuard, sendWithFreshKeys } from "./send-guard.mjs";
 
 // salt-agent-sdk is CJS, so its exports are read off the default object (as index.mjs does).
 const { createSocketClient, encryptFor } = pkg;
@@ -354,11 +355,16 @@ export function createChannelBridge({
 
   /** Encrypts for exactly the members just checked (never a separately fetched list) and posts. Errors propagate. */
   async function sendEncrypted(chatId, users, text) {
-    const recipientKeys = users.filter((u) => idKey(u.id) !== idKey(caller.saltAppId) && u.public_key).map((u) => u.public_key);
-    if (recipientKeys.length === 0) throw new Error(`chat ${chatId} has no member public keys to encrypt for.`);
-    const message = await encrypt(text, recipientKeys);
-    const senderMessage = await encrypt(text, [caller.publicKey]);
-    await client.postMessage(caller.apiKey, chatId, message, senderMessage);
+    // The send guard: fingerprints of the keys used. A stale_recipient_keys refusal re-encrypts once to the keys Salt returns.
+    await sendWithFreshKeys(users, async (current) => {
+      const recipientKeys = current.filter((u) => idKey(u.id) !== idKey(caller.saltAppId) && u.public_key).map((u) => u.public_key);
+      if (recipientKeys.length === 0) throw new Error(`chat ${chatId} has no member public keys to encrypt for.`);
+      const message = await encrypt(text, recipientKeys);
+      const senderMessage = await encrypt(text, [caller.publicKey]);
+      const guard = buildGuard(current, caller.saltAppId);
+      // delegations, mentions, then the options (guard fields need a salt-agent-sdk with the key-reset release; older ones ignore them)
+      return client.postMessage(caller.apiKey, chatId, message, senderMessage, undefined, undefined, guard.recipientFingerprints ? guard : undefined);
+    });
   }
 
   /** A fresh member list for the chat, or a thrown reason it must not be used. */

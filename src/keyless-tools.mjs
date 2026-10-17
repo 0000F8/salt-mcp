@@ -24,6 +24,7 @@
 
 import pkg from "salt-agent-sdk";
 import { SaltBearerApiError } from "./salt-bearer-client.mjs";
+import { buildGuard, sendWithFreshKeys } from "./send-guard.mjs";
 import { CARD_UI_RESOURCE_URI } from "./card-ui.mjs";
 import { ROOM_TOOL_METADATA, runRoomTool } from "./room-tools.mjs";
 
@@ -371,8 +372,13 @@ async function sendMessage(rest, bearerToken, input) {
   if (missingKey) {
     throw new Error(`Can't send: ${missingKey.display_name || missingKey.username || "a member"} hasn't set up an encryption key yet.`);
   }
-  const ciphertext = await encryptFor(text, members.map((m) => m.public_key));
-  const result = await rest.postMessage(bearerToken, chatId, ciphertext);
+  // The roster above was read now, at send time. A stale_recipient_keys refusal re-encrypts once to the
+  // keys Salt returns. No sender_fingerprint: this server holds no key of its own, and Salt ignores the
+  // sender's own entry in the recipient map.
+  const result = await sendWithFreshKeys(members, async (current) => {
+    const ciphertext = await encryptFor(text, current.map((m) => m.public_key));
+    return rest.postMessage(bearerToken, chatId, ciphertext, undefined, buildGuard(current));
+  });
   return { sent: true, message_id: str(result?.id ?? null) };
 }
 

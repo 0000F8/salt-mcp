@@ -19,6 +19,7 @@
 import { randomUUID } from "node:crypto";
 import { toolResult } from "./tool-result.mjs";
 import { cleanMessageText, previewText } from "./me-markers.mjs";
+import { buildGuard, guardBody, sendWithFreshKeys } from "./send-guard.mjs";
 import { encryptForKeys, decryptAttachmentBytes, ENCRYPTED_PLACEHOLDER, MAX_ATTACHMENT_BYTES } from "./me-crypto.mjs";
 
 const PLAIN_ID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)$/;
@@ -541,8 +542,16 @@ export function createMeHandlers({ session, readOnly = false, host }) {
     }
 
     const desc = describeChat(info, me);
-    const body = encrypted ? await encryptForKeys(text, keys) : text;
-    const posted = await session.post("/api/v1/messages", { chat_id: id, message: body, mentions: [...ids] }, { "Idempotency-Key": randomUUID() });
+    // One Idempotency-Key across the (at most one) stale_recipient_keys retry: Salt runs the re-encrypted resend for real.
+    const headers = { "Idempotency-Key": randomUUID() };
+    const post = async (current) => {
+      const currentKeys = current.map((u) => u.public_key).filter(Boolean);
+      const body = encrypted ? await encryptForKeys(text, currentKeys) : text;
+      // The guard names the key every member (this owner included) was encrypted to. Open rooms have no keys to guard.
+      const guard = encrypted ? guardBody(buildGuard(current, me)) : {};
+      return session.post("/api/v1/messages", { chat_id: id, message: body, mentions: [...ids], ...guard }, headers);
+    };
+    const posted = encrypted ? await sendWithFreshKeys(members, post) : await post(members);
     return { sent: true, message_id: String(posted?.id ?? posted?.message_id ?? ""), chat_id: id, chat_name: desc.name };
   }
 

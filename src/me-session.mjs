@@ -187,13 +187,18 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     if (await pickupThenRetry(res)) res = await request("POST", path, { body, headers });
     if (!res.ok) {
       let detail = "";
+      let refusal;
       try {
         const j = await res.json();
         if (typeof j?.error === "string") detail = `: ${j.error}`;
+        refusal = j;
       } catch {
         // no body worth showing
       }
-      throw new MeError(`Salt refused the message (${res.status})${detail}`, { status: res.status });
+      const err = new MeError(`Salt refused the message (${res.status})${detail}`, { status: res.status });
+      // The refusal's machine code and (for stale_recipient_keys) the current members, so a sender can re-encrypt once.
+      if (refusal && typeof refusal === "object") err.body = { code: refusal.code, members: refusal.members };
+      throw err;
     }
     return res.json();
   }

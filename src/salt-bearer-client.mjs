@@ -24,6 +24,8 @@
 // independent layer (refusing anything that isn't a bare UUID/integer
 // BEFORE it ever reaches here) -- belt and suspenders, not either/or.
 
+import { guardBody } from "./send-guard.mjs";
+
 /**
  * Mirrors salt-agent-sdk's SaltApiError shape (status + body + one-sentence
  * message). `retryAfterSeconds` (2026-09-19 availability review, N2) carries
@@ -125,9 +127,14 @@ export function createSaltBearerClient({ host, fetchImpl, authHeaders }) {
       return request("GET", `/api/v1/chats/${encodeURIComponent(chatId)}`, bearerToken);
     },
 
-    /** Post a ciphertext message. No senderMessage -- a keyless agent has no private key to read one back with. */
-    async postMessage(bearerToken, chatId, message) {
-      return request("POST", "/api/v1/messages", bearerToken, { chat_id: chatId, message });
+    /**
+     * Post a ciphertext message. No senderMessage for a keyless agent (no private key to read one back with).
+     * `guard` is the send guard ({recipientFingerprints, senderFingerprint}, see send-guard.mjs).
+     */
+    async postMessage(bearerToken, chatId, message, senderMessage, guard) {
+      const body = { chat_id: chatId, message, ...guardBody(guard) };
+      if (senderMessage) body.sender_message = senderMessage;
+      return request("POST", "/api/v1/messages", bearerToken, body);
     },
 
     /** One emoji on a message (a toggle: the same emoji again removes it). POST /api/v1/messages/:id/reactions, on the OAuth allowlist at `chat`. */
