@@ -80,7 +80,7 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
 
   /** The link is gone (unlinked from the phone, or never made): forget it and start linking. Always throws. */
   async function relink() {
-    linkClient.remove();
+    await linkClient.remove();
     token = null;
     privateKey = null;
     decryptText = null;
@@ -196,13 +196,13 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
 
   // Link mode: the stored link, or a new one started (which asks the owner to scan it, so this throws).
   async function unlockLinked() {
-    const link = linkClient.read();
+    const link = await linkClient.load();
     if (!link) await relink();
     token = `Bearer ${link.token}`;
     user = { id: link.user?.id ?? null, username: link.user?.handle ?? null, display_name: link.user?.name ?? null };
     let armored;
     try {
-      armored = await linkClient.open(link);
+      armored = (await linkClient.open(link)).privateKey;
     } catch (err) {
       if (err?.kind === "unlinked") await relink();
       throw asMeError(err);

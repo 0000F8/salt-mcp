@@ -6,8 +6,11 @@
 //                    Default sign-in is a LINK (me-link.mjs): the first tool call opens a page with a QR code, the
 //                    owner's phone scans and approves it, and this computer keeps a linked-device token and the
 //                    messages key, sealed to a key it made, in ~/Library/Application Support/salt-mcp/link-<host>.json
-//                    (0600). That file IS stored: a program running as you can read it. The token reaches chats only,
-//                    never wallets, money or settings; unlink from the phone (Connections) or with --unlink.
+//                    (0600), with the device private key in the login Keychain (in the file off macOS). That file IS
+//                    stored: a program running as you can read it, and the token in it can read your chats and send
+//                    as you (to people and to your agents), but never reaches wallets, money or settings. Unlink from
+//                    the phone (Connections) or with --unlink; if you did not link it, unlink and change your password.
+//                    SALT_ME_HANDLE=<your handle> refuses a link approved by any other account.
 //   --password       the older path: signs in with the Salt password typed into a hidden dialog (or
 //                    SALT_ME_PASSWORD_CMD, which implies --password), unlocks the key locally, saves nothing, and
 //                    signs out on exit, revoking its session.
@@ -86,13 +89,13 @@ export async function runAsMe({ argv = process.argv.slice(2), env = process.env,
   const readOnly = argv.includes("--read-only");
   const host = (env.HOST || DEFAULT_HOST).replace(/\/$/, "");
   assertSafeHost(host, env);
-  const linkClient = passwordMode ? null : createLinkClient({ host, ...linkOptions });
+  const linkClient = passwordMode ? null : createLinkClient({ host, pinHandle: env.SALT_ME_HANDLE, ...linkOptions });
 
   if (argv.includes("--unlink")) {
     const link = linkClient?.read();
     if (!link) return log("nothing to unlink: this computer has no link for " + host);
     const cancelled = await linkClient.unlinkRemote(link);
-    linkClient.remove();
+    await linkClient.remove();
     return log(cancelled ? "unlinked: Salt cancelled this computer's link and the link file is deleted" : "link file deleted; Salt could not be told, so also unlink this computer from your phone (Connections)");
   }
 

@@ -18,17 +18,17 @@ const TOKEN = "sld_test-token-0123456789";
 const DEVICE_ID = "dddddddd-0000-4000-8000-000000000001";
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-async function setup({ sealWith, sealedFingerprint } = {}) {
+async function setup({ sealWith, sealedFingerprint, sealedUserId = ME_ID, pinHandle = null, platform = "darwin" } = {}) {
   const world = await makeWorld();
   const openpgp = await loadOpenpgp();
   const baseDir = join(mkdtempSync(join(tmpdir(), "salt-link-")), "salt-mcp");
-  const st = { links: 0, status: "pending", devicePublicKey: null, unlinked: false, calls: [], deleted: [], opened: [], timers: [], clock: 1_000_000 };
+  const st = { keychain: new Map(), commands: [], logs: [], links: 0, status: "pending", devicePublicKey: null, unlinked: false, calls: [], deleted: [], opened: [], timers: [], clock: 1_000_000 };
 
   async function seal() {
     const signer = await openpgp.readPrivateKey({ armoredKey: (sealWith ?? world.keys.me).privateKey });
     const fingerprint = sealedFingerprint ?? world.keys.me.fingerprint;
     return openpgp.encrypt({
-      message: await openpgp.createMessage({ text: JSON.stringify({ v: 1, private_key: world.keys.me.privateKey, user_id: ME_ID, fingerprint }) }),
+      message: await openpgp.createMessage({ text: JSON.stringify({ v: 1, private_key: world.keys.me.privateKey, user_id: sealedUserId, fingerprint }) }),
       encryptionKeys: await openpgp.readKey({ armoredKey: st.devicePublicKey }),
       signingKeys: signer,
     });
@@ -66,7 +66,29 @@ async function setup({ sealWith, sealedFingerprint } = {}) {
     return res;
   };
 
+  // A fake macOS keychain behind `security`, recording every command line and stdin so a test can look for the secret.
+  const runCommand = async (file, args, { input } = {}) => {
+    st.commands.push({ file, args, input });
+    if (file === "/usr/bin/security" && args[0] === "-i") {
+      const [, , , service, , account, , b64] = input.trim().split(" ");
+      assert.equal(input.trim().split(" ")[0], "add-generic-password");
+      st.keychain.set(`${service}/${account}`, b64);
+      return "";
+    }
+    if (file === "/usr/bin/security" && args[0] === "find-generic-password") {
+      const v = st.keychain.get(`${args[2]}/${args[4]}`);
+      if (!v) throw new Error("not found");
+      return `${v}\n`;
+    }
+    if (file === "/usr/bin/security" && args[0] === "delete-generic-password") {
+      st.keychain.delete(`${args[2]}/${args[4]}`);
+      return "";
+    }
+    return "";
+  };
+
   const linkOptions = {
+    pinHandle, runCommand, platform, log: (m) => st.logs.push(m),
     baseDir, hostname: "Test-Mac", fetchImpl,
     openBrowser: async (url) => { st.opened.push(url); },
     setTimer: (fn, ms) => { st.timers.push({ fn, ms }); return st.timers.length; },
@@ -114,7 +136,10 @@ test("approval: polled every 3 s, stored 0600 in a 0700 directory, then every ca
   assert.equal(stored.v, 1);
   assert.equal(stored.token, TOKEN);
   assert.deepEqual(stored.linked_device, { id: DEVICE_ID, name: "Claude on Test-Mac" });
-  assert.ok(stored.device_private_key && stored.sealed_key && stored.linked_at);
+  assert.ok(stored.sealed_key && stored.linked_at);
+  assert.equal(stored.device_private_key, undefined, "the device key is not in the file");
+  assert.equal(stored.key_store, "keychain");
+  assert.equal(st.keychain.size, 1);
 
   const handlers = createMeHandlers({ session, host: HOST });
   const chat = await handlers.callTool("salt_me_read_chat", { chat_id: CHAT_ADA, limit: 3 });
@@ -167,6 +192,8 @@ test("a sealed key not signed by the owner's key is refused and nothing is store
   await tick();
   assert.equal(existsSync(linkClient.path), false);
   assert.equal(st.timers.length, 0);
+  assert.deepEqual(st.deleted, [`Bearer ${TOKEN}`], "the token just issued was cancelled");
+  assert.equal(st.keychain.size, 0);
 });
 
 test("a fingerprint in the sealed key that is not the owner's is refused and nothing is stored", async () => {
@@ -175,6 +202,75 @@ test("a fingerprint in the sealed key that is not the owner's is refused and not
   st.status = "approved";
   await tick();
   assert.equal(existsSync(linkClient.path), false);
+  assert.deepEqual(st.deleted, [`Bearer ${TOKEN}`]);
+});
+
+test("a sealed key for a different user id than the claim's is refused, stored nowhere, and the token cancelled", async () => {
+  const { st, session, linkClient, tick } = await setup({ sealedUserId: "someone-else" });
+  await linkFirst(session.get("/api/v1/chats"));
+  st.status = "approved";
+  await tick();
+  assert.equal(existsSync(linkClient.path), false);
+  assert.equal(st.keychain.size, 0);
+  assert.deepEqual(st.deleted, [`Bearer ${TOKEN}`]);
+});
+
+test("SALT_ME_HANDLE pins the account: another handle is refused and cancelled, the right one (with or without @) links", async () => {
+  const wrong = await setup({ pinHandle: "somebody" });
+  await linkFirst(wrong.session.get("/api/v1/chats"));
+  wrong.st.status = "approved";
+  await wrong.tick();
+  assert.equal(existsSync(wrong.linkClient.path), false);
+  assert.deepEqual(wrong.st.deleted, [`Bearer ${TOKEN}`]);
+  const right = await setup({ pinHandle: "@Owner" });
+  await linkFirst(right.session.get("/api/v1/chats"));
+  right.st.status = "approved";
+  await right.tick();
+  assert.ok(existsSync(right.linkClient.path));
+  assert.deepEqual(right.st.deleted, []);
+});
+
+test("the device key goes to the Keychain through stdin: never on a command line, not in the file; unlink removes both; the file is excluded from backups", async () => {
+  const { st, session, linkClient, tick, linkOptions } = await setup();
+  await linkFirst(session.get("/api/v1/chats"));
+  st.status = "approved";
+  await tick();
+  const [, b64] = [...st.keychain.entries()][0];
+  const armored = Buffer.from(b64, "base64").toString("utf8");
+  assert.match(armored, /BEGIN PGP PRIVATE KEY BLOCK/);
+  assert.deepEqual([...st.keychain.keys()], ["salt-mcp-link/salt-test"]);
+  for (const c of st.commands) {
+    const argv = [c.file, ...c.args].join(" ");
+    assert.ok(!argv.includes(b64) && !argv.includes("PRIVATE KEY") && !argv.includes(armored.slice(60, 100)), "no secret in argv");
+  }
+  assert.ok(st.commands.some((c) => c.args[0] === "-i" && c.input.includes(b64)), "the secret went in on stdin");
+  assert.ok(!readFileSync(linkClient.path, "utf8").includes("PRIVATE KEY"));
+  assert.ok(st.commands.some((c) => c.file === "/usr/bin/tmutil" && c.args[0] === "addexclusion" && c.args[1] === linkClient.path));
+  await runAsMe({ argv: ["--as-me", "--unlink"], env: { HOST }, platform: "darwin", linkOptions });
+  assert.equal(existsSync(linkClient.path), false);
+  assert.equal(st.keychain.size, 0);
+});
+
+test("a Keychain that will not take the key refuses the link and cancels the token", async () => {
+  const { st, tick, linkOptions } = await setup();
+  const failing = createLinkClient({ host: HOST, ...linkOptions, runCommand: async () => { throw new Error("locked"); } });
+  const s2 = createMeSession({ host: HOST, fetchImpl: linkOptions.fetchImpl, linkClient: failing });
+  await linkFirst(s2.get("/api/v1/chats"));
+  st.status = "approved";
+  await tick();
+  assert.equal(existsSync(failing.path), false);
+  assert.deepEqual(st.deleted, [`Bearer ${TOKEN}`]);
+});
+
+test("off macOS the device key falls back to the file, with a line saying so", async () => {
+  const { st, session, linkClient, tick } = await setup({ platform: "linux" });
+  await linkFirst(session.get("/api/v1/chats"));
+  st.status = "approved";
+  await tick();
+  assert.ok(JSON.parse(readFileSync(linkClient.path, "utf8")).device_private_key);
+  assert.equal(st.keychain.size, 0);
+  assert.equal(st.logs.length, 1);
+  await session.get("/api/v1/chats");
 });
 
 test("401 device_unlinked deletes the link file and the next call starts linking", async () => {
@@ -187,6 +283,7 @@ test("401 device_unlinked deletes the link file and the next call starts linking
   st.unlinked = true;
   await linkFirst(session.get("/api/v1/chats"));
   assert.equal(existsSync(linkClient.path), false);
+  assert.equal(st.keychain.size, 0, "the Keychain item went too");
   assert.equal(st.links, 2, "a new link was started");
 });
 
