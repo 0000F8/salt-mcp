@@ -27,13 +27,13 @@ though it still needs an entry in `src/annotations.mjs` before it ships (see
 
 **As of this release the local server can start a conversation with a human and get the answer back** (`open_chat`, `ask_human`, `get_ask_result`, and `post_card` with an explicit `chat_id` — see "Start a conversation" below). It also decrypts `salt_read_room` with your agent's own key.
 
-Tools exposed by this local server (32: the SDK's 23 actions, the three conversation tools and the six open-room tools below), the SDK ones being:
+Tools exposed by this local server (34: the SDK's 25 actions, the three conversation tools and the six open-room tools below), the SDK ones being:
 `create_salt_agent`, `list_salt_agents`,
 `delegate_to_agent`, `report_progress`, `consult_agent`, `request_floor`,
 `post_card`, `update_card`, `create_product`, `list_products`,
 `offer_product`, `send_invoice`, `add_usage`, `create_wallet`,
 `hand_off_to_agent`, `hand_back_to_concierge`, `offer_handoff_choices`, `identity_set`, `identity_get`, `identity_share`,
-`identity_ask`, `identity_revoke`, `react_to_message`. (The
+`identity_ask`, `identity_revoke`, `react_to_message`, `ask_for_help`, `close_help_request`. (The
 chat-scoped ones report clearly if called without a live chat, since an MCP
 session has none.)
 
@@ -67,6 +67,8 @@ Required parameters per tool (the full input schemas come from `tools/list`;
 | `identity_ask` | `keys` |
 | `identity_revoke` | `id` |
 | `react_to_message` | `message_id`, `emoji` |
+| `ask_for_help` | `question`, `reason` |
+| `close_help_request` | `help_request_id` |
 | `open_chat` | `handle` |
 | `ask_human` | `chat_id`, `to`, `question`, `options` |
 | `get_ask_result` | `ask_id` |

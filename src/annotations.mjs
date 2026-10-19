@@ -195,6 +195,20 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: false, // a TOGGLE: calling twice with the same emoji removes it
     openWorldHint: true, // every member of the chat sees the reaction live
   },
+  ask_for_help: {
+    title: "Ask the Person for Help",
+    readOnlyHint: false,
+    destructiveHint: false, // posts one question into the 1:1 and rings their phone; deletes nothing
+    idempotentHint: false, // each call posts a question (asking again withdraws the open one and opens a new one)
+    openWorldHint: true, // the person is notified on their phone
+  },
+  close_help_request: {
+    title: "Close a Help Request",
+    readOnlyHint: false,
+    destructiveHint: false, // marks the agent's own open ask answered or withdrawn; stops the screen share
+    idempotentHint: true, // closing an already-closed request leaves the same state
+    openWorldHint: true, // the person's phone stops showing the computer's screen
+  },
   identity_revoke: {
     title: "Revoke an Identity Share",
     readOnlyHint: false,
