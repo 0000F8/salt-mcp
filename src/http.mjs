@@ -53,6 +53,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import pkg from "salt-agent-sdk";
 import { toMcpTools } from "./annotations.mjs";
+import { landingHandler, notFoundHandler } from "./landing.mjs";
 import { loadOAuthConfig, registerProtectedResourceRoutes, extractBearerToken, sendUnauthorized, sendInvalidToken } from "./oauth.mjs";
 import { createSaltBearerClient } from "./salt-bearer-client.mjs";
 import { KEYLESS_TOOLS, toKeylessMcpTools, keylessToolsForScopes, runKeylessTool } from "./keyless-tools.mjs";
@@ -241,6 +242,9 @@ export function createApp({ host, fetchImpl, oauthConfig, env, rateLimiter, rate
     res.status(200).json({ status: "ok", tools: hostedDefinitions.length + toKeylessMcpTools().length })
   );
 
+  // A person or agent opening the bare host: how to connect (JSON or a page).
+  app.get("/", landingHandler(config));
+
   // Stateless Streamable HTTP: each POST is an independent MCP request
   // carrying its own credentials. A fresh server+transport per request
   // keeps callers fully isolated -- no shared session state, nothing to
@@ -352,6 +356,9 @@ export function createApp({ host, fetchImpl, oauthConfig, env, rateLimiter, rate
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   });
+
+  // Anything else is a JSON 404 (a page for a browser), not Express's default.
+  app.use(notFoundHandler(config));
 
   return app;
 }

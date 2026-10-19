@@ -642,6 +642,11 @@ It speaks MCP over stdio (all diagnostics go to stderr, never stdout).
 
 ## Hosted variant (Streamable HTTP)
 
+Open `https://mcp.saltapp.ai/` in a browser for a connect guide, or ask for JSON
+(`curl -H "Accept: application/json" https://mcp.saltapp.ai/`) for the MCP URL,
+transport, OAuth discovery document and install commands. Any other unknown path
+answers `404` with `{"error":"not_found","code":"not_found","message","docs_url"}`.
+
 `src/http.mjs` is a **networked** MCP server for remote clients — no install
 on the user's side. `POST /mcp` speaks two different auth/identity models,
 checked in this order:

@@ -87,6 +87,11 @@ commit a `file:`-referenced dependency.
 - `src/keyless-tools.mjs` — the hosted OAuth path's own, larger tool catalog
   (messaging, cards, `ask_human`, payments) for a keyless agent identity;
   paired with `src/salt-bearer-client.mjs` (the REST client for that path).
+- `src/landing.mjs` — what the hosted host answers outside `/mcp`: `GET /` is
+  a connect guide (JSON for a caller, a small page for a browser, by
+  `Accept`), and any unmatched path is `404 {error:"not_found",
+  code:"not_found", message, docs_url}` (a page when the caller prefers
+  `text/html`). Static; never calls salt-api.
 - `src/room-tools.mjs` — the four open-room tools (not SDK actions), shared
   verbatim by both servers.
 - `skills/salt/SKILL.md` — the Agent Skill teaching an agent how to *use*
