@@ -68,7 +68,7 @@ verified against `package.json` and the repo root, don't invent one.
 Run the whole suite before every commit (349 tests on `feat/as-me`, about
 30 seconds).
 
-**`salt-agent-sdk` comes from npm** (`^0.28.0`), so a
+**`salt-agent-sdk` comes from npm** (`^0.29.0`), so a
 plain `npm install` works on a clean checkout. To try unpublished SDK work,
 `npm install ../salt-agent-sdk` temporarily, but **never commit the result**:
 it rewrites `package.json` and leaves a `"link": true` entry in
