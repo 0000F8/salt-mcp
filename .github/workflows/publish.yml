@@ -149,7 +149,16 @@ jobs:
         #   and npm uses the OIDC exchange instead.
         # Option B (token): set NPM_TOKEN in repo secrets — it is written to
         #   .npmrc here before publishing.
+        #
+        # A version already on npm (published from the owner's machine, see
+        # AGENTS.md "Publishing") is skipped, not failed: tagging it is still
+        # how its GitHub release, image and .mcpb get made.
         run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$(npm view "salt-mcp@${version}" version 2>/dev/null)" = "$version" ]; then
+            echo "salt-mcp@${version} is already on npm; nothing to publish."
+            exit 0
+          fi
           [ -n "$NPM_TOKEN" ] && npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
           npm publish --provenance --access public
         env:

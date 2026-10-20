@@ -224,7 +224,7 @@ this repo by publishing the SDK first, then bumping the range here.
 
 ## Publishing
 
-- **npm**: `salt-mcp` 0.3.0 was published 2026-10-14 from the owner's
+- **npm**: `salt-mcp` 0.3.0 was published 2026-10-19 from the owner's
   machine with the vault token (`python3 ../salt-deploy/scripts/vault.py
   with-secret --env NODE_AUTH_TOKEN npm token -- npm publish --access public`;
   never print the token). `salt-agent-sdk` must already be on npm at the range
