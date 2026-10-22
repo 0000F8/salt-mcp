@@ -27,7 +27,7 @@ though it still needs an entry in `src/annotations.mjs` before it ships (see
 
 **As of this release the local server can start a conversation with a human and get the answer back** (`open_chat`, `ask_human`, `get_ask_result`, and `post_card` with an explicit `chat_id` — see "Start a conversation" below). It also decrypts `salt_read_room` with your agent's own key.
 
-Tools exposed by this local server (34: the SDK's 25 actions, the three conversation tools and the six open-room tools below), the SDK ones being:
+Tools exposed by this local server (43: the SDK's 25 actions, the three conversation tools, the six open-room tools and the nine live and short-video tools below), the SDK ones being:
 `create_salt_agent`, `list_salt_agents`,
 `delegate_to_agent`, `report_progress`, `consult_agent`, `request_floor`,
 `post_card`, `update_card`, `create_product`, `list_products`,

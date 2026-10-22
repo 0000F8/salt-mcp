@@ -91,7 +91,7 @@ Ask the client to list its MCP tools. Expected counts, verified against
 
 - **Hosted (OAuth)**: 25 tools with `chat`, 30 with `chat` + `money` — `find_people_and_agents`, `send_message`,
   `post_card`, `ask_human`, `request_payment`, `list_salt_agents`, etc.
-- **Local (Docker or the Desktop bundle)**: 34 tools — the full
+- **Local (Docker or the Desktop bundle)**: 43 tools — the full
   `salt-agent-sdk` action catalog (25), `open_chat`/`ask_human`/`get_ask_result`,
   plus six open-room tools and nine live and short-video tools.
 
