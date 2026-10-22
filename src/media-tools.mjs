@@ -118,7 +118,7 @@ async function resolvePublicHttps(raw, lookupImpl) {
 function pinnedGet(url, address) {
   return new Promise((resolve, reject) => {
     const family = net.isIPv6(address) ? 6 : 4;
-    const req = https.request(url, { method: "GET", lookup: (_host, _opts, cb) => cb(null, address, family), servername: net.isIP(url.hostname) ? undefined : url.hostname }, (res) => {
+    const req = https.request(url, { method: "GET", lookup: (_host, opts, cb) => (opts?.all ? cb(null, [{ address, family }]) : cb(null, address, family)), servername: net.isIP(url.hostname) ? undefined : url.hostname }, (res) => {
       const chunks = [];
       let size = 0;
       res.on("data", (c) => {
