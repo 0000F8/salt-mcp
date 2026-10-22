@@ -37,7 +37,7 @@ export const isMessageFrame = (p) => p && typeof p === "object" && !("type" in p
  * }} deps
  */
 export function createLive({
-  session, decode, chatMeta, notify,
+  session, decode, decodeWork, chatMeta, notify,
   WebSocketImpl = globalThis.WebSocket, now = () => Date.now(), random = Math.random,
   setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval,
   backoff = { base: 1000, max: 30000 }, pingTimeoutMs = 15000, livenessCheckMs = 5000, log = () => {},
@@ -103,7 +103,35 @@ export function createLive({
     return r;
   };
 
+  /**
+   * A message in a lane under a chat (coaching_for_chat_id): only its work reports matter (decodeWork returns null for
+   * anything else), and they belong to the PARENT chat.
+   */
+  async function processLane(msg) {
+    const parent = String(msg.coaching_for_chat_id);
+    const watched = watches.has(parent);
+    if ((msg.observer || msg.request_state) && !watched) return;
+    if (!decodeWork) return;
+    const ring = ringOf(`lane:${msg.chat_id}`);
+    const id = String(msg.id);
+    if (ring.some((e) => e.id === id)) return;
+    const w = await decodeWork(msg);
+    if (!w || w.mine) return;
+    const entry = { id, mine: false, text: w.title, deleted: false, out: w.out };
+    ring.push(entry);
+    if (ring.length > RING_SIZE) ring.shift();
+    for (const x of [...waiters]) {
+      if (x.includeWork && (x.chatId === null || x.chatId === parent)) {
+        x.entries.push(entry);
+        if (!x.settle) x.settle = Promise.resolve().then(() => finish(x, false));
+      }
+    }
+    if (watched) await push(parent, entry, w.out.status, "work");
+    return entry;
+  }
+
   async function process(msg) {
+    if (msg.coaching_for_chat_id !== undefined && msg.coaching_for_chat_id !== null) return processLane(msg);
     const chatId = String(msg.chat_id);
     const watched = watches.has(chatId);
     if ((msg.observer || msg.request_state) && !watched) return;
@@ -146,7 +174,7 @@ export function createLive({
     return run;
   };
 
-  async function push(chatId, entry, event) {
+  async function push(chatId, entry, event, kind = "message") {
     if (!notifier) return;
     const from = entry.out?.from || {};
     try {
@@ -161,6 +189,7 @@ export function createLive({
           sender_type: String(from.type ?? ""),
           time: String(entry.out?.time ?? ""),
           event,
+          ...(kind === "work" ? { kind: "work", status: String(entry.out?.status ?? ""), title: String(entry.text ?? "") } : {}),
         },
       });
     } catch (err) {
@@ -331,7 +360,7 @@ export function createLive({
 
   // ---------- public ----------
 
-  async function wait({ chat_id = null, after_message_id = null, timeout_s = 120, from = "others" } = {}) {
+  async function wait({ chat_id = null, after_message_id = null, timeout_s = 120, from = "others", include_work = false } = {}) {
     const chatId = chat_id === null ? null : String(chat_id);
     if (after_message_id !== null && !chatId) throw new Error("after_message_id needs a chat_id.");
     await ensureOpen();
@@ -352,7 +381,7 @@ export function createLive({
       if (ready.length) return { messages: ready.map((e) => e.out), timed_out: false };
     }
     return new Promise((resolve, reject) => {
-      const w = { chatId, from, resolve, reject, entries: [], settle: null, timer: null };
+      const w = { chatId, from, includeWork: include_work, resolve, reject, entries: [], settle: null, timer: null };
       w.timer = setTimeoutImpl(() => finish(w, true), Math.max(0, timeout_s) * 1000);
       waiters.add(w);
     });

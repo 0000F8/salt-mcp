@@ -21,6 +21,7 @@ import { toolResult } from "./tool-result.mjs";
 import { cleanMessageText, previewText } from "./me-markers.mjs";
 import { buildGuard, guardBody, sendWithFreshKeys } from "./send-guard.mjs";
 import { createLive } from "./me-live.mjs";
+import { parseWorkReport, backgroundSections, STALE_AFTER_MS } from "./me-work.mjs";
 import { encryptForKeys, decryptAttachmentBytes, ENCRYPTED_PLACEHOLDER, MAX_ATTACHMENT_BYTES } from "./me-crypto.mjs";
 
 const PLAIN_ID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)$/;
@@ -154,6 +155,7 @@ const LIVE_TOOLS = [
         after_message_id: { type: "string", description: "Return what arrived after this message id (needs a chat)." },
         timeout_s: { type: "integer", minimum: 1, maximum: MAX_WAIT_S, description: `How long to wait, in seconds. Default ${DEFAULT_WAIT_S}, up to ${MAX_WAIT_S}.` },
         from: { type: "string", enum: ["others", "anyone"], description: "Whose messages count. Default others (not the owner's own)." },
+        include_work: { type: "boolean", description: "Also return when an agent posts a background-work report for this chat (type \"work\" in the result). Default false." },
       },
       additionalProperties: false,
     },
@@ -175,6 +177,25 @@ const LIVE_TOOLS = [
       additionalProperties: false,
     },
     annotations: { title: "Watch a Salt chat", ...READ_ANNOTATIONS, openWorldHint: true },
+  },
+  {
+    name: "salt_me_work",
+    title: "Agents' background work in a Salt chat",
+    description:
+      "Shows what agents are doing in the background for the owner in one chat (chat_id or name), exactly as Salt's Background panel does: scheduled, in_progress " +
+      "(with stale = no update for 10 minutes), waiting (work that needs the owner, or a question) and done (finished within 24 hours; include_done false leaves it out). " +
+      "Each item has id, status, title, detail, agent, kind, started_at, updated_at, lane_id and how many reports it took. " +
+      `Reads the chat's private lanes, decrypted on this computer. ${DATA_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat_id: ID_PROP,
+        name: { type: "string", description: "A chat or person name, used when chat_id is not known." },
+        include_done: { type: "boolean", description: "Include work finished in the last 24 hours. Default true." },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: "Agents' background work in a Salt chat", ...READ_ANNOTATIONS },
   },
   {
     name: "salt_me_live_status",
@@ -304,14 +325,17 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
 
   const meId = () => session.me?.id ?? null;
 
-  async function bodyOf(msg) {
+  /** The decrypted text with its wire markers still in it (a work report is read from this, then never shown raw). */
+  async function rawBodyOf(msg) {
     if (msg.deleted_at) return "[deleted]";
     const mine = meId() && (msg.created_by === meId() || msg.user?.id === meId());
     const raw = msg.sender_message && mine ? msg.sender_message : msg.message;
     if (raw === null || raw === undefined || raw === "") return "";
-    if (msg.encrypted === false) return cleanMessageText(raw);
-    return cleanMessageText(await session.decrypt(raw));
+    if (msg.encrypted === false) return raw;
+    return session.decrypt(raw);
   }
+
+  const bodyOf = async (msg) => (msg.deleted_at ? "[deleted]" : cleanMessageText(await rawBodyOf(msg)));
 
   async function listChats({ filter = "all", query } = {}) {
     const rows = await session.get(filter === "requests" ? "/api/v1/chats?requests=1" : "/api/v1/chats");
@@ -648,6 +672,7 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
   const live = createLive({
     session,
     decode: liveDecode,
+    decodeWork,
     chatMeta: async (chatId) => {
       const info = await chatInfo(chatId);
       return { name: info.name, newestId: info.newestId };
@@ -664,7 +689,107 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
     if (args.after_message_id !== undefined && !hasChat) throw new Error("after_message_id needs a chat_id or name.");
     await session.ensureUnlocked();
     const chat_id = hasChat ? await resolveChatId(args) : null;
-    return live.wait({ chat_id, after_message_id: args.after_message_id === undefined ? null : String(args.after_message_id), timeout_s: timeout, from: args.from ?? "others" });
+    if (args.include_work !== undefined && typeof args.include_work !== "boolean") throw new Error("include_work must be true or false.");
+    return live.wait({ chat_id, after_message_id: args.after_message_id === undefined ? null : String(args.after_message_id), timeout_s: timeout, from: args.from ?? "others", include_work: args.include_work === true });
+  }
+
+  // ---------- background work (me-work.mjs) ----------
+
+  const shapeWork = (r, now) => {
+    const out = {
+      id: r.id,
+      status: r.status,
+      kind: r.kind,
+      title: wrapData(r.title),
+      ...(r.detail ? { detail: wrapData(r.detail) } : {}),
+      agent: { name: r.agentName || null, handle: r.with ? `@${r.with}` : null },
+      started_at: r.startedAt ? new Date(r.startedAt).toISOString() : null,
+      updated_at: r.updatedAt ? new Date(r.updatedAt).toISOString() : null,
+      lane_id: r.laneId,
+      reports: r.stream.length,
+    };
+    if (r.status === "running") out.stale = Boolean(r.stale ?? now - r.updatedAt > STALE_AFTER_MS);
+    if (r.due) out.due = r.due;
+    if (r.repeat) out.repeat = r.repeat;
+    if (r.progress) out.progress = r.progress;
+    if (r.stuck) out.stuck = true;
+    if (r.needsKind) out.needs_kind = r.needsKind;
+    if (r.where) out.where = wrapData(r.where);
+    if (r.needs) out.needs = wrapData(r.needs);
+    if (r.steps) out.steps = r.steps.map((s) => wrapData(s));
+    if (r.transferId) out.transfer_id = r.transferId;
+    return out;
+  };
+
+  /** The work reports in one lane, newest page first, paging back only while pages still hold reports (at most 6 pages). */
+  async function laneReports(laneId, fallbackName) {
+    const items = [];
+    let withName = fallbackName;
+    let page = await session.get(`/api/v1/chats/${encodeURIComponent(laneId)}`);
+    const others = (page?.session?.users || []).filter((u) => u.id !== meId());
+    if (others.length) withName = others.map(displayName).join(", ");
+    for (let pages = 1; pages <= 6; pages++) {
+      const batch = Array.isArray(page?.messages) ? page.messages : [];
+      let found = 0;
+      for (const m of batch) {
+        if (m.event_type || (meId() && (m.created_by === meId() || m.user?.id === meId()))) continue;
+        const report = parseWorkReport(await rawBodyOf(m).catch(() => null));
+        if (!report) continue;
+        found++;
+        items.push({ id: String(m.id ?? m.message_id), laneId, at: Date.parse(m.created_at || 0) || messageTime(m), work: report, withName, isOwn: false });
+      }
+      if (batch.length < PAGE_SIZE || !found) break;
+      const oldest = [...batch].sort((a, b) => messageTime(a) - messageTime(b))[0];
+      page = await session.get(`/api/v1/chats/${encodeURIComponent(laneId)}/previous?last=${encodeURIComponent(String(oldest.id ?? oldest.message_id))}`);
+    }
+    return items;
+  }
+
+  async function workTool(args) {
+    if (args.include_done !== undefined && typeof args.include_done !== "boolean") throw new Error("include_done must be true or false.");
+    await session.ensureUnlocked();
+    const id = await resolveChatId(args);
+    const page = await session.get(`/api/v1/chats/${encodeURIComponent(id)}`);
+    const lanes = (Array.isArray(page?.session?.sidechains) ? page.session.sidechains : []).slice(0, 30);
+    const items = [];
+    for (const lane of lanes) {
+      const laneId = String(lane?.id ?? lane?.chat_id ?? "");
+      if (!PLAIN_ID_RE.test(laneId)) continue;
+      const hint = typeof lane.with === "string" ? lane.with : lane.with?.display_name || lane.with?.username || null;
+      items.push(...(await laneReports(laneId, hint).catch(() => [])));
+    }
+    const now = Date.now();
+    const sections = backgroundSections({ items, now, includeDone: args.include_done !== false });
+    return {
+      chat: page?.session ? describeChat(page.session, meId()) : { id },
+      scheduled: sections.scheduled.map((r) => shapeWork(r, now)),
+      in_progress: sections.running.map((r) => shapeWork(r, now)),
+      waiting: sections.waiting.map((r) => shapeWork(r, now)),
+      done: sections.done.map((r) => shapeWork(r, now)),
+      lanes_read: lanes.length,
+    };
+  }
+
+  const workOut = (shaped, msg) => ({
+    type: "work",
+    ...shaped,
+    text: shaped.detail ? `${shaped.title}\n${shaped.detail}` : shaped.title,
+    time: msg.created_at ?? null,
+    chat: { id: String(msg.coaching_for_chat_id) },
+    message_id: String(msg.id),
+  });
+
+  /** A lane message from the live socket: its work report (as the shape wait returns), or null for anything else. */
+  async function decodeWork(msg) {
+    if (msg.event_type) return null;
+    const report = parseWorkReport(await rawBodyOf(msg).catch(() => null));
+    if (!report) return null;
+    const me = meId();
+    const mine = Boolean(me && (msg.created_by === me || msg.user?.id === me));
+    const lane = await chatInfo(String(msg.chat_id)).catch(() => null);
+    const sender = msg.user || lane?.users.get(msg.created_by) || {};
+    const r = { ...report, laneId: String(msg.chat_id), stream: [], startedAt: Date.parse(msg.created_at || 0) || 0, updatedAt: Date.parse(msg.created_at || 0) || 0, agentName: displayName(sender), with: report.with || sender.username || null };
+    return { mine, title: report.title, out: workOut(shapeWork(r, Date.now()), msg) };
   }
 
   async function watchTool(args) {
@@ -697,6 +822,8 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
         return waitTool(args);
       case "salt_me_watch":
         return watchTool(args);
+      case "salt_me_work":
+        return workTool(args);
       case "salt_me_live_status":
         return live.status();
       case SEND_TOOL.name:

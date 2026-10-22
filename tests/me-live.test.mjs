@@ -7,6 +7,7 @@ import { z } from "zod";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createLive, isMessageFrame } from "../src/me-live.mjs";
+import { parseWorkReport } from "../src/me-work.mjs";
 import { createMeHandlers, DATA_LABEL } from "../src/me-tools.mjs";
 import { buildMeServer } from "../src/me-cli.mjs";
 import { makeWorld, CHAT_ADA, ME_ID, ADA_ID } from "./me-fixtures.mjs";
@@ -73,6 +74,10 @@ function setup({ me = "me", get = async () => ({ messages: [] }), meta = async (
     livenessCheckMs,
     notify: (p) => notes.push(p),
     chatMeta: meta,
+    decodeWork: async (m) => {
+      const r = parseWorkReport(m.message);
+      return r ? { mine: m.created_by === me, title: r.title, out: { type: "work", id: r.id, status: r.status, title: `${DATA_LABEL} ${r.title}`, text: `${DATA_LABEL} ${r.title}`, chat: { id: String(m.coaching_for_chat_id) }, lane_id: String(m.chat_id) } } : null;
+    },
     decode: async (m) => ({
       mine: m.created_by === me,
       text: m.deleted_at ? "[deleted]" : m.message,
@@ -296,4 +301,39 @@ test("handlers: salt_me_wait over a real session returns labelled text; salt_me_
 
   handlers.live.stop();
   await Promise.all([client.close(), server.close()]);
+});
+
+const laneMsg = (id, text, extra = {}) => msg(id, "lane-1", text, "agent", { coaching_for_chat_id: "c1", ...extra });
+
+test("a work report in a lane under a WATCHED chat is pushed once as a work notification, never as message text", async () => {
+  const { live, open, notes } = setup({ meta: async () => ({ name: "Trip", newestId: "1" }) });
+  const ws = await open();
+  await live.watch("c1");
+  ws.data(laneMsg(30, "[[SALT-WORK id=w_1 status=running]]\nChecking flights"));
+  ws.data(laneMsg(30, "[[SALT-WORK id=w_1 status=running]]\nChecking flights"));
+  ws.data(laneMsg(31, "just chatter in the lane"));
+  ws.data(laneMsg(32, "[[SALT-WORK id=w_1 status=done]]\nBooked", { created_by: "me" }));
+  await tick(30);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].meta.kind, "work");
+  assert.equal(notes[0].meta.status, "running");
+  assert.equal(notes[0].meta.title, "Checking flights");
+  assert.equal(notes[0].meta.chat_id, "c1");
+  assert.ok(!notes[0].content.includes("SALT-WORK"));
+  live.stop();
+});
+
+test("a report under an unwatched chat is not pushed; include_work resolves a wait on the parent chat, a plain wait does not", async () => {
+  const { live, open, notes } = setup();
+  const ws = await open();
+  const plain = live.wait({ chat_id: "c1", timeout_s: 0.08 });
+  const withWork = live.wait({ chat_id: "c1", include_work: true, timeout_s: 5 });
+  await tick();
+  ws.data(laneMsg(40, "[[SALT-WORK id=w_9 status=waiting]]\nWhich one?"));
+  const res = await withWork;
+  assert.equal(res.messages[0].type, "work");
+  assert.equal(res.messages[0].status, "waiting");
+  assert.deepEqual(await plain, { messages: [], timed_out: true });
+  assert.equal(notes.length, 0);
+  live.stop();
 });
