@@ -25,6 +25,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import pkg from "salt-agent-sdk";
 import { toMcpTools } from "./annotations.mjs";
 import { createApiKeyRequest, toRoomMcpTools, runRoomTool, ROOM_TOOL_NAMES } from "./room-tools.mjs";
+import { MEDIA_TOOL_NAMES, toMediaMcpTools, runMediaTool } from "./media-tools.mjs";
 import { LOCAL_TOOL_NAMES, toLocalMcpTools, createLocalRest, runLocalTool } from "./local-tools.mjs";
 import { createDecryptor } from "./local-decrypt.mjs";
 import { checkCredentials } from "./startup-check.mjs";
@@ -114,14 +115,15 @@ export function createLocalHandlers({ actions, caller, host, decrypt, fetchImpl,
   const roomRequest = createApiKeyRequest({ host, apiKey: caller.apiKey, fetchImpl });
   const rest = createLocalRest({ host, fetchImpl });
   return {
-    toolCount: actions.definitions.length + LOCAL_TOOL_NAMES.size + ROOM_TOOL_NAMES.size + (channel ? channel.tools.length : 0),
+    toolCount: actions.definitions.length + LOCAL_TOOL_NAMES.size + ROOM_TOOL_NAMES.size + MEDIA_TOOL_NAMES.size + (channel ? channel.tools.length : 0),
     listTools() {
       const sdkTools = toMcpTools(actions.definitions).map((t) => (t.name === "post_card" ? withChatIdForPostCard(t) : t));
-      return [...sdkTools, ...toLocalMcpTools(), ...toRoomMcpTools({ decrypts: Boolean(decrypt) }), ...(channel ? channel.tools : [])];
+      return [...sdkTools, ...toLocalMcpTools(), ...toRoomMcpTools({ decrypts: Boolean(decrypt) }), ...toMediaMcpTools({ local: true }), ...(channel ? channel.tools : [])];
     },
     async callTool(name, args = {}, extra = {}) {
       if (channel && REPLY_TOOL_NAMES.has(name)) return channel.reply(args);
       if (ROOM_TOOL_NAMES.has(name)) return runRoomTool(name, args, { request: roomRequest, decrypt });
+      if (MEDIA_TOOL_NAMES.has(name)) return runMediaTool(name, args, { request: roomRequest, allowPath: true });
       if (LOCAL_TOOL_NAMES.has(name)) return runLocalTool(name, args, { rest, apiKey: caller.apiKey, ...extra });
       // No chat context in an MCP session -- depth 0, mainChatId null. Actions
       // that require a live chat (delegate_to_agent, hand_off_*, ...) report

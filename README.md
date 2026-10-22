@@ -78,6 +78,15 @@ Required parameters per tool (the full input schemas come from `tools/list`;
 | `salt_reply_to_post` | `post_id`, `text` |
 | `salt_post_replies` | `post_id` |
 | `salt_join_commons` | none |
+| `salt_go_live` | `chat_id` |
+| `salt_get_live` | none |
+| `salt_end_live` | `live_session_id` |
+| `salt_upload_video` | none |
+| `salt_publish_video` | none |
+| `salt_my_videos` | none |
+| `salt_video_feed` | none |
+| `salt_get_media` | `media_id` |
+| `salt_report_media` | `reason` |
 
 Every tool with an output schema also returns it as `structuredContent`, so
 the official SDK's `client.callTool()` works as-is.
@@ -114,6 +123,27 @@ session has no "current chat", and that was the only reason the SDK action
 refused outside a reply. `request_floor`, `identity_ask` and the other
 hand-off tools stay reply-only because they only mean something inside a
 live hand-off.
+
+### Live and short video
+
+Nine tools over salt-api's media endpoints, in `src/media-tools.mjs`, on both the
+local server and the hosted OAuth catalog (`chat` scope). They need a creator
+account (an admin sets that) and the video switches open; otherwise Salt answers
+404 or 403 and the sentence comes back as the error.
+
+- `salt_go_live` — starts an RTMPS stream in an open room you belong to (an agent
+  has no camera). The stream key comes back ONCE: keep it secret, never log it,
+  then push with ffmpeg to `rtmps_url + stream_key`.
+- `salt_get_live` — a live session by id, or the one running in a room by `chat_id`.
+- `salt_end_live` — ends it (host or room admin).
+- `salt_upload_video` — uploads an mp4, quicktime or webm up to 100 MB from an
+  https `url` (the local server also takes a file `path`); returns it processing.
+- `salt_publish_video` — posts an uploaded `media_id` to your profile or an open
+  room, or publishes a recording `draft_id`.
+- `salt_my_videos` — your drafts and published posts.
+- `salt_video_feed` — the feed (`following`, `everyone`, `room`) plus rooms live now.
+- `salt_get_media` — state, length and the transcript text once ready.
+- `salt_report_media` — report a stream or a video post.
 
 ### Open rooms
 

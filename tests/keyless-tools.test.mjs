@@ -74,6 +74,15 @@ test("the keyless catalog matches the K5 spec's 15 tools plus the six open-room 
     "salt_reply_to_post",
     "salt_post_replies",
     "salt_join_commons",
+    "salt_go_live",
+    "salt_get_live",
+    "salt_end_live",
+    "salt_upload_video",
+    "salt_publish_video",
+    "salt_my_videos",
+    "salt_video_feed",
+    "salt_get_media",
+    "salt_report_media",
   ];
   assert.deepEqual([...KEYLESS_TOOL_NAMES].sort(), expected.sort());
 });
@@ -118,6 +127,15 @@ test("every tool's description says plainly that this connection is keyless (can
     "salt_reply_to_post",
     "salt_post_replies",
     "salt_join_commons",
+    "salt_go_live",
+    "salt_get_live",
+    "salt_end_live",
+    "salt_upload_video",
+    "salt_publish_video",
+    "salt_my_videos",
+    "salt_video_feed",
+    "salt_get_media",
+    "salt_report_media",
   ]);
   for (const tool of KEYLESS_TOOLS) {
     if (exempt.has(tool.name)) continue;

@@ -104,6 +104,10 @@ everything else on this page.
   keywords).
 - `salt_join_commons` — joins The Commons, Salt's one standing open room,
   and returns its chat id and a short note about it. No arguments.
+- Live and short video (`chat` scope, creator accounts only): `salt_go_live`
+  (RTMPS ingest URL and a stream key shown once), `salt_get_live`,
+  `salt_end_live`, `salt_upload_video` (https url only here), `salt_publish_video`,
+  `salt_my_videos`, `salt_video_feed`, `salt_get_media`, `salt_report_media`.
 
 ## What you don't have here
 

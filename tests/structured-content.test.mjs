@@ -21,6 +21,9 @@ const KEYS = await generateKeypair("pw");
 const HOST = "https://salt.test";
 const CHAT = "11111111-1111-1111-1111-111111111111";
 const CARD = "22222222-2222-2222-2222-222222222222";
+const LIVE = "Lq3f8aZkP2xVnR7tYb1HdA";
+const MEDIA = "Mq3f8aZkP2xVnR7tYb1HdB";
+const VPOST = "Vq3f8aZkP2xVnR7tYb1HdC";
 const WALLET = "88888888-8888-8888-8888-888888888888";
 const HUMAN = { id: "77777777-7777-7777-7777-777777777777", username: "ada", display_name: "Ada", account_type: "User", public_key: KEYS.publicKey };
 const BOT = { id: "99999999-9999-9999-9999-999999999999", username: "bot", display_name: "Bot", account_type: "Agent", public_key: KEYS.publicKey };
@@ -54,6 +57,16 @@ function fakeSaltFetch() {
     "GET /api/v1/transfer_requests": () => json([{ id: 41, status: "Pending", amount: "12.5" }]),
     "GET /api/v1/products": () => json([{ id: "p1" }]),
     "POST /api/v1/products": () => json({ id: "p1" }),
+    "POST /api/v1/live_sessions": () => json({ live_session: { id: LIVE, chat_id: CHAT, state: "connecting", source_type: "rtmp", record: true }, publish: { ingest_endpoint: "x.live-video.net", rtmps_url: "rtmps://x.live-video.net:443/app/", stream_key: "sk" } }, 201),
+    [`GET /api/v1/live_sessions/${LIVE}`]: () => json({ live_session: { id: LIVE, state: "live" } }),
+    [`POST /api/v1/live_sessions/${LIVE}/end`]: () => json({ live_session: { id: LIVE, state: "ending" } }),
+    "POST /api/v1/media": () => json({ media: { id: MEDIA, state: "uploading" }, upload: { upload_id: "u1", part_size: 1048576, parts: [{ n: 1, url: "https://s3.example.test/p1" }] } }, 201),
+    [`POST /api/v1/media/${MEDIA}/complete`]: () => json({ media: { id: MEDIA, state: "processing" } }),
+    [`GET /api/v1/media/${MEDIA}`]: () => json({ media: { id: MEDIA, state: "ready" } }),
+    "POST /api/v1/video_posts": () => json({ video_post: { id: VPOST, status: "published", media: { id: MEDIA, state: "ready" } } }, 201),
+    "GET /api/v1/video_posts/mine": () => json({ video_posts: [] }),
+    "GET /api/v1/video/feed": () => json({ items: [], live: [], next_before_seq: null }),
+    [`POST /api/v1/video_posts/${VPOST}/reports`]: () => json({}, 201),
   };
   return async (url, init = {}) => {
     const u = new URL(url);
@@ -62,8 +75,20 @@ function fakeSaltFetch() {
   };
 }
 
+/** Third-party hosts the media tools reach (video source, presigned part URL): answered here so no test touches the network. */
+const realFetch = globalThis.fetch;
+function stubExternalFetch() {
+  globalThis.fetch = async (url, init = {}) => {
+    const u = new URL(url);
+    if (u.hostname === "93.184.216.34") return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "video/mp4" } });
+    if (u.hostname === "s3.example.test") return new Response("", { status: 200, headers: { ETag: '"e1"' } });
+    return realFetch(url, init);
+  };
+}
+
 /** Calls `name` through the Client; callTool throws if structuredContent is missing or invalid. */
 async function callAll(client, argsByTool) {
+  stubExternalFetch();
   const { tools } = await client.listTools();
   const withSchema = tools.filter((t) => t.outputSchema);
   const called = new Set();
@@ -90,6 +115,15 @@ const ARGS = {
   salt_reply_to_post: { post_id: "41", text: "agreed" },
   salt_post_replies: { post_id: "41" },
   salt_join_commons: {},
+  salt_go_live: { chat_id: CHAT, record: true },
+  salt_get_live: { live_session_id: LIVE },
+  salt_end_live: { live_session_id: LIVE },
+  salt_upload_video: { url: "https://93.184.216.34/a.mp4" },
+  salt_publish_video: { media_id: MEDIA, caption: "hi" },
+  salt_my_videos: { status: "draft" },
+  salt_video_feed: { scope: "everyone" },
+  salt_get_media: { media_id: MEDIA },
+  salt_report_media: { video_post_id: VPOST, reason: "spam" },
   post_card: { chat_id: CHAT, blocks: [{ type: "section", text: "x" }] },
   react_to_message: { message_id: "5", emoji: "\u2705" },
   update_card: { card_id: CARD, blocks: [{ type: "section", text: "x" }] },

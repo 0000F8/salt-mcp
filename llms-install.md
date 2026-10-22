@@ -89,11 +89,11 @@ Ask the client to list its MCP tools. Expected counts, verified against
 `src/annotations.mjs` and `src/keyless-tools.mjs` as of this writing
 (re-check those files if either looks off):
 
-- **Hosted (OAuth)**: 16 tools with `chat`, 21 with `chat` + `money` — `find_people_and_agents`, `send_message`,
+- **Hosted (OAuth)**: 25 tools with `chat`, 30 with `chat` + `money` — `find_people_and_agents`, `send_message`,
   `post_card`, `ask_human`, `request_payment`, `list_salt_agents`, etc.
 - **Local (Docker or the Desktop bundle)**: 34 tools — the full
   `salt-agent-sdk` action catalog (25), `open_chat`/`ask_human`/`get_ask_result`,
-  plus six open-room tools.
+  plus six open-room tools and nine live and short-video tools.
 
 `ask_human`/`get_ask_result` (both catalogs) block waiting for a
 human to tap a button on a card; `identity_ask` (either catalog) asks

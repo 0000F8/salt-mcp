@@ -26,6 +26,7 @@ import pkg from "salt-agent-sdk";
 import { SaltBearerApiError } from "./salt-bearer-client.mjs";
 import { CARD_UI_RESOURCE_URI } from "./card-ui.mjs";
 import { ROOM_TOOL_METADATA, runRoomTool } from "./room-tools.mjs";
+import { MEDIA_TOOL_METADATA, runMediaTool } from "./media-tools.mjs";
 
 const { encryptFor } = pkg;
 
@@ -679,6 +680,13 @@ export const KEYLESS_TOOLS = [
     ...meta,
     scope: SCOPES.CHAT,
     execute: (rest, bearerToken, input) => runRoomTool(meta.name, input, { request: (method, path, body) => rest.rawRequest(bearerToken, method, path, body) }),
+  })),
+  // Live and short video (2026-10-21): shared with the local server, see src/media-tools.mjs. `chat` scope: going live and posting
+  // a video are room actions, like posting a card. No file paths here: a hosted server never reads its own disk for a caller.
+  ...MEDIA_TOOL_METADATA.map((meta) => ({
+    ...meta,
+    scope: SCOPES.CHAT,
+    execute: (rest, bearerToken, input) => runMediaTool(meta.name, input, { request: (method, path, body) => rest.rawRequest(bearerToken, method, path, body) }),
   })),
   {
     name: "post_card",
