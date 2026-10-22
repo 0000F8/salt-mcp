@@ -79,7 +79,7 @@ function fakeSaltFetch() {
 /** Third-party hosts the media tools reach (video source, presigned part URL): answered here so no test touches the network. */
 const realFetch = globalThis.fetch;
 function stubExternalFetch() {
-  videoSource.get = async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "video/mp4" } });
+  videoSource.get = async () => new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "video/mp4", "content-length": "3" } });
   globalThis.fetch = async (url, init = {}) => {
     const u = new URL(url);
     if (u.hostname === "93.184.216.34") return new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "video/mp4" } });
