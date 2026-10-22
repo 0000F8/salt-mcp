@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { videoSource, createMediaTools, runMediaTool, toMediaMcpTools, MEDIA_TOOL_METADATA, MEDIA_TOOL_NAMES } from "../src/media-tools.mjs";
+import { EventEmitter } from "node:events";
+import { videoSource, pinnedGet, createMediaTools, runMediaTool, toMediaMcpTools, MEDIA_TOOL_METADATA, MEDIA_TOOL_NAMES } from "../src/media-tools.mjs";
 
 const CHAT = "11111111-1111-1111-1111-111111111111";
 const LIVE = "Lq3f8aZkP2xVnR7tYb1HdA";
@@ -26,7 +27,14 @@ function fakeRequest(routes) {
 
 // The video getter (pinned to the checked address in production) answers from the latest externalFetch in these tests.
 let lastExternal;
-videoSource.get = async (url) => lastExternal(url.toString(), {});
+/** A HEAD answers the GET's status and headers, with the content-length the body would have had. */
+async function asHead(res, opts) {
+  if (opts?.method !== "HEAD" || (res.status >= 300 && res.status < 400)) return res;
+  const h = new Headers(res.headers);
+  if (!h.has("content-length")) h.set("content-length", String((await res.clone().arrayBuffer()).byteLength));
+  return new Response(null, { status: res.status, headers: h });
+}
+videoSource.get = async (url, _address, opts) => asHead(await lastExternal(url.toString(), {}), opts);
 
 const publicLookup = async () => [{ address: "93.184.216.34" }];
 
@@ -48,9 +56,9 @@ function externalFetch(handlers) {
 /** Replaces the pinned video getter: handlers get (url, address) and the call is recorded. */
 function stubVideoSource(handler) {
   const calls = [];
-  videoSource.get = async (url, address) => {
-    calls.push({ url: url.toString(), address });
-    return handler(url, address);
+  videoSource.get = async (url, address, opts) => {
+    if (opts?.method !== "HEAD") calls.push({ url: url.toString(), address });
+    return asHead(await handler(url, address), opts);
   };
   return calls;
 }
@@ -127,10 +135,10 @@ test("uploadVideo refuses http, private hosts, redirects into private hosts, ove
   });
   const tools = createMediaTools({ request, fetchImpl: ext, lookupImpl: lookup });
   await assert.rejects(() => tools.uploadVideo({ url: "http://clips.test/a.mp4" }), /https/);
-  await assert.rejects(() => tools.uploadVideo({ url: "https://internal.test/a.mp4" }), /public host/);
-  await assert.rejects(() => tools.uploadVideo({ url: "https://127.0.0.1/a.mp4" }), /public host/);
-  await assert.rejects(() => tools.uploadVideo({ url: "https://[::1]/a.mp4" }), /public host/);
-  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/redirect" }), /public host/);
+  await assert.rejects(() => tools.uploadVideo({ url: "https://internal.test/a.mp4" }), /isn't allowed/);
+  await assert.rejects(() => tools.uploadVideo({ url: "https://127.0.0.1/a.mp4" }), /isn't allowed/);
+  await assert.rejects(() => tools.uploadVideo({ url: "https://[::1]/a.mp4" }), /isn't allowed/);
+  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/redirect" }), /isn't allowed/);
   await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/big" }), /over 100 MB/);
   await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/page" }), /video\/mp4, video\/quicktime or video\/webm/);
   assert.equal(calls.length, 0);
@@ -291,11 +299,11 @@ test("the video fetch connects to the address that was checked, even if DNS answ
   const seen = stubVideoSource((url) => (url.pathname === "/hop" ? new Response("", { status: 302, headers: { location: "https://other.test/a.mp4" } }) : bytesResponse([1])));
   const ext = externalFetch({ "s3.test": () => new Response("", { status: 200, headers: { ETag: '"e"' } }) });
   const tools = createMediaTools({ request, fetchImpl: ext, lookupImpl: rebinding });
-  await tools.uploadVideo({ url: "https://clips.test/a.mp4" });
+  await tools.uploadVideo({ url: "https://clips.test/a.mp4", byte_size: 1, content_type: "video/mp4" });
   assert.deepEqual(seen, [{ url: "https://clips.test/a.mp4", address: "93.184.216.34" }]);
   assert.equal(lookups, 1);
   // The second DNS answer is loopback: a fresh lookup is refused outright, so nothing is fetched.
-  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/hop" }), /public host/);
+  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/hop", byte_size: 1, content_type: "video/mp4" }), /isn't allowed/);
   assert.equal(seen.length, 1);
 });
 
@@ -309,4 +317,155 @@ test("each redirect hop is resolved and pinned to its own checked address", asyn
   const ext = externalFetch({ "s3.test": () => new Response("", { status: 200, headers: { ETag: '"e"' } }) });
   await createMediaTools({ request, fetchImpl: ext, lookupImpl: lookup }).uploadVideo({ url: "https://clips.test/a.mp4" });
   assert.deepEqual(seen.map((c) => c.address), ["93.184.216.34", "93.184.216.35"]);
+});
+
+// --- M5: URL checks, timeouts, API-first, generic errors ---
+
+test("literal hosts in every non-public range are refused, including IPv4-mapped, IPv4-compatible and NAT64 IPv6", async () => {
+  const { request, calls } = fakeRequest(UPLOAD_ROUTES);
+  const seen = stubVideoSource(() => bytesResponse([1]));
+  const tools = createMediaTools({ request, lookupImpl: publicLookup });
+  const hosts = ["[::ffff:10.0.0.5]", "[::ffff:a00:5]", "[::ffff:127.0.0.1]", "[::10.0.0.5]", "[64:ff9b::a00:5]", "[64:ff9b::808:808]", "198.18.0.1", "198.19.255.255", "169.254.169.254", "[::ffff:169.254.169.254]", "100.64.0.1", "192.0.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1", "255.255.255.255", "0.0.0.0", "[::]", "[fe80::1]", "[fc00::1]", "[ff02::1]", "[2001:db8::1]", "[2002:a00:5::]"];
+  for (const h of hosts) {
+    await assert.rejects(() => tools.uploadVideo({ url: `https://${h}/a.mp4`, byte_size: 1, content_type: "video/mp4" }), /isn't allowed/, h);
+  }
+  assert.equal(seen.length, 0);
+  assert.equal(calls.length, 0);
+});
+
+test("public literals, including a mapped public IPv4, are still allowed", async () => {
+  const { request } = fakeRequest(UPLOAD_ROUTES);
+  const seen = stubVideoSource(() => bytesResponse([1, 2, 3, 4, 5, 6]));
+  const ext = externalFetch({ "s3.test": (u) => new Response("", { status: 200, headers: { ETag: `"e-${u.pathname.slice(-1)}"` } }) });
+  await createMediaTools({ request, fetchImpl: ext, lookupImpl: publicLookup }).uploadVideo({ url: "https://[::ffff:93.184.216.34]/a.mp4", byte_size: 6, content_type: "video/mp4" });
+  assert.equal(seen[0].address, "::ffff:5db8:d822");
+});
+
+test("a resolved address that is mapped, NAT64 or 198.18 is refused, and so is a redirect to one", async () => {
+  const { request } = fakeRequest(UPLOAD_ROUTES);
+  const answers = { "mapped.test": "::ffff:a00:5", "nat.test": "64:ff9b::a00:5", "bench.test": "198.18.0.9", "clips.test": "93.184.216.34" };
+  const seen = stubVideoSource((url) => (url.hostname === "clips.test" ? new Response("", { status: 302, headers: { location: "https://bench.test/x.mp4" } }) : bytesResponse([1])));
+  const tools = createMediaTools({ request, lookupImpl: async (h) => [{ address: answers[h] }] });
+  for (const host of ["mapped.test", "nat.test", "bench.test", "clips.test"]) {
+    await assert.rejects(() => tools.uploadVideo({ url: `https://${host}/a.mp4`, byte_size: 1, content_type: "video/mp4" }), /isn't allowed/, host);
+  }
+  assert.deepEqual(seen.map((c) => c.url), ["https://clips.test/a.mp4"]);
+});
+
+test("a redirect to a private literal is refused", async () => {
+  const { request } = fakeRequest(UPLOAD_ROUTES);
+  stubVideoSource(() => new Response("", { status: 302, headers: { location: "https://[::ffff:10.0.0.5]/x.mp4" } }));
+  await assert.rejects(() => createMediaTools({ request, lookupImpl: publicLookup }).uploadVideo({ url: "https://clips.test/a.mp4", byte_size: 1, content_type: "video/mp4" }), /isn't allowed/);
+});
+
+test("no fetch happens when the API refuses the upload", async () => {
+  const { request, calls } = fakeRequest({
+    "POST /api/v1/media": () => {
+      throw new Error("Salt API POST /api/v1/media -> 403: Only creators can upload video.");
+    },
+  });
+  const seen = [];
+  videoSource.get = async (url, address, opts) => {
+    seen.push({ url: url.toString(), method: opts?.method });
+    return bytesResponse([1]);
+  };
+  const tools = createMediaTools({ request, lookupImpl: publicLookup });
+  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/a.mp4", byte_size: 1, content_type: "video/mp4" }), /403: Only creators/);
+  assert.equal(seen.length, 0);
+  assert.deepEqual(calls[0].body, { kind: "video", byte_size: 1, content_type: "video/mp4", filename: "a.mp4" });
+});
+
+test("without a declared size the source is asked by HEAD, and a missing or oversize Content-Length is refused before the API", async () => {
+  const { request, calls } = fakeRequest(UPLOAD_ROUTES);
+  const seen = [];
+  videoSource.get = async (url, address, opts) => {
+    seen.push(opts?.method);
+    if (url.pathname === "/none") return new Response(null, { status: 200, headers: { "content-type": "video/mp4" } });
+    return new Response(null, { status: 200, headers: { "content-type": "video/mp4", "content-length": String(200 * 1024 * 1024) } });
+  };
+  const tools = createMediaTools({ request, lookupImpl: publicLookup });
+  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/none" }), /size isn't known/);
+  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/huge" }), /over 100 MB/);
+  assert.deepEqual(seen, ["HEAD", "HEAD"]);
+  assert.equal(calls.length, 0);
+});
+
+test("a body that is not the declared size is refused", async () => {
+  const { request } = fakeRequest(UPLOAD_ROUTES);
+  stubVideoSource(() => bytesResponse([1, 2, 3]));
+  await assert.rejects(() => createMediaTools({ request, lookupImpl: publicLookup }).uploadVideo({ url: "https://clips.test/a.mp4", byte_size: 6, content_type: "video/mp4" }), /size changed/);
+});
+
+test("errors from the fetched host never reach the caller", async () => {
+  const { request } = fakeRequest(UPLOAD_ROUTES);
+  const tools = createMediaTools({ request, lookupImpl: publicLookup });
+  const args = { url: "https://clips.test/a.mp4", byte_size: 1, content_type: "video/mp4" };
+  for (const failure of [() => new Response("nope", { status: 503 }), () => new Response("", { status: 404 }), () => { throw new Error("SSL routines:tls_process_server_certificate:certificate verify failed"); }, () => { throw new Error("getaddrinfo ENOTFOUND clips.test"); }]) {
+    stubVideoSource(failure);
+    await assert.rejects(() => tools.uploadVideo(args), (err) => err.message === "Couldn't download that video.");
+  }
+  await assert.rejects(() => createMediaTools({ request, lookupImpl: async () => { throw new Error("queryA ECONNREFUSED 10.1.2.3:53"); } }).uploadVideo(args), (err) => err.message === "Couldn't download that video.");
+  await assert.rejects(() => tools.uploadVideo({ url: "https://10.0.0.5/a.mp4", byte_size: 1, content_type: "video/mp4" }), (err) => err.message === "That address isn't allowed.");
+});
+
+// A fake https.request: the request is an EventEmitter with destroy/setTimeout/end, the response streams on demand.
+function fakeHttps(onRequest) {
+  const record = { destroyed: null, timeoutMs: null, timeoutCb: null, options: null };
+  const requestImpl = (url, options, cb) => {
+    const req = new EventEmitter();
+    record.options = options;
+    req.setTimeout = (ms, fn) => { record.timeoutMs = ms; record.timeoutCb = fn; };
+    req.destroy = (err) => { record.destroyed = err ?? true; if (err) setImmediate(() => req.emit("error", err)); };
+    req.end = () => onRequest(cb, record);
+    return req;
+  };
+  return { requestImpl, record };
+}
+
+test("the pinned GET sets a 30 s socket timeout and gives up when it fires", async () => {
+  const { requestImpl, record } = fakeHttps(() => {});
+  const p = pinnedGet(new URL("https://clips.test/a.mp4"), "93.184.216.34", { requestImpl });
+  assert.equal(record.timeoutMs, 30000);
+  record.timeoutCb();
+  await assert.rejects(p, /timeout/);
+  assert.ok(record.destroyed);
+});
+
+test("the whole download has a deadline", async () => {
+  const { requestImpl, record } = fakeHttps(() => {});
+  await assert.rejects(pinnedGet(new URL("https://clips.test/a.mp4"), "93.184.216.34", { requestImpl, deadline: Date.now() + 20 }), /deadline/);
+  assert.ok(record.destroyed);
+  const done = fakeHttps(() => {});
+  await assert.rejects(pinnedGet(new URL("https://clips.test/a.mp4"), "93.184.216.34", { requestImpl: done.requestImpl, deadline: Date.now() - 1 }), /deadline/);
+});
+
+test("the pinned GET aborts as soon as the stream passes 100 MB, without reading the rest", async () => {
+  let pushed = 0;
+  const { requestImpl, record } = fakeHttps((cb) => {
+    const res = new EventEmitter();
+    res.statusCode = 200;
+    res.headers = {};
+    cb(res);
+    const chunk = Buffer.alloc(10 * 1024 * 1024);
+    for (let i = 0; i < 20 && !record.destroyed; i++) {
+      pushed++;
+      res.emit("data", chunk);
+    }
+  });
+  await assert.rejects(pinnedGet(new URL("https://clips.test/a.mp4"), "93.184.216.34", { requestImpl }), (err) => err.message === "That video is over 100 MB.");
+  assert.equal(pushed, 11);
+});
+
+test("the pinned GET connects to the checked address and sends HEAD without a body", async () => {
+  const { requestImpl, record } = fakeHttps((cb) => {
+    const res = new EventEmitter();
+    res.statusCode = 200;
+    res.headers = { "content-length": "7" };
+    cb(res);
+    res.emit("end");
+  });
+  const res = await pinnedGet(new URL("https://clips.test/a.mp4"), "93.184.216.34", { requestImpl, method: "HEAD" });
+  assert.equal(record.options.method, "HEAD");
+  assert.equal(res.headers.get("content-length"), "7");
+  await new Promise((r) => record.options.lookup("clips.test", {}, (e, a) => { assert.equal(a, "93.184.216.34"); r(); }));
 });

@@ -88,56 +88,127 @@ function summarizeVideoPost(p) {
   };
 }
 
-function isPrivateAddress(address) {
-  if (net.isIPv4(address)) {
-    const [a, b] = address.split(".").map(Number);
-    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224;
+/** An error whose message is safe to hand to the caller. Anything else from the download path is replaced by a plain sentence. */
+class SafeError extends Error {}
+
+const NOT_ALLOWED = "That address isn't allowed.";
+const DOWNLOAD_FAILED = "Couldn't download that video.";
+const SOCKET_TIMEOUT_MS = 30 * 1000;
+const DOWNLOAD_DEADLINE_MS = 5 * 60 * 1000;
+
+const NON_PUBLIC = new net.BlockList();
+for (const [net4, prefix] of [
+  ["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10], ["127.0.0.0", 8], ["169.254.0.0", 16], ["172.16.0.0", 12],
+  ["192.0.0.0", 24], ["192.0.2.0", 24], ["192.168.0.0", 16], ["198.18.0.0", 15], ["198.51.100.0", 24], ["203.0.113.0", 24],
+  ["224.0.0.0", 4], ["240.0.0.0", 4],
+]) NON_PUBLIC.addSubnet(net4, prefix, "ipv4");
+NON_PUBLIC.addAddress("169.254.169.254", "ipv4");
+NON_PUBLIC.addAddress("255.255.255.255", "ipv4");
+for (const [net6, prefix] of [
+  ["::", 128], ["::1", 128], ["fc00::", 7], ["fe80::", 10], ["ff00::", 8], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64],
+  ["2001::", 32], ["2001:db8::", 32], ["2002::", 16],
+]) NON_PUBLIC.addSubnet(net6, prefix, "ipv6");
+
+/** Eight 16-bit groups of an IPv6 address, or null when it does not parse. */
+function ipv6Groups(address) {
+  let a = address.toLowerCase().split("%")[0];
+  const dotted = a.match(/^(.*:)(\d+\.\d+\.\d+\.\d+)$/);
+  if (dotted) {
+    if (!net.isIPv4(dotted[2])) return null;
+    const o = dotted[2].split(".").map(Number);
+    a = `${dotted[1]}${((o[0] << 8) | o[1]).toString(16)}:${((o[2] << 8) | o[3]).toString(16)}`;
   }
-  const v6 = address.toLowerCase();
-  if (v6.startsWith("::ffff:")) return isPrivateAddress(v6.slice(7));
-  return v6 === "::" || v6 === "::1" || v6.startsWith("fc") || v6.startsWith("fd") || v6.startsWith("fe8") || v6.startsWith("fe9") || v6.startsWith("fea") || v6.startsWith("feb");
+  const halves = a.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return null;
+  const groups = [...head, ...Array(fill).fill("0"), ...tail].map((g) => parseInt(g, 16));
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? groups : null;
 }
 
-/** https only, and never an address inside the host's own network. Returns the URL and the ONE address to connect to. */
-async function resolvePublicHttps(raw, lookupImpl) {
+/** True for anything that is not a routable public address. IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
+ *  forms are judged as the IPv4 address they carry; an address that does not parse counts as non-public. */
+function isPrivateAddress(address) {
+  if (net.isIPv4(address)) return NON_PUBLIC.check(address, "ipv4");
+  if (!net.isIPv6(address)) return true;
+  const g = ipv6Groups(address);
+  if (!g) return true;
+  const v4 = `${g[6] >> 8}.${g[6] & 255}.${g[7] >> 8}.${g[7] & 255}`;
+  if (g.slice(0, 5).every((x) => x === 0) && (g[5] === 0xffff || (g[5] === 0 && (g[6] !== 0 || g[7] > 1)))) return NON_PUBLIC.check(v4, "ipv4");
+  return NON_PUBLIC.check(g.map((x) => x.toString(16)).join(":"), "ipv6");
+}
+
+function withDeadline(promise, deadline) {
+  const ms = deadline - Date.now();
+  if (ms <= 0) return Promise.reject(new Error("deadline"));
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("deadline")), ms); })]).finally(() => clearTimeout(timer));
+}
+
+/** The checks that need no network: a valid https URL whose host, if a literal address, is public. */
+function parsePublicHttps(raw) {
   let url;
   try {
     url = new URL(raw);
   } catch {
-    throw new Error("url must be a valid https URL.");
+    throw new SafeError("url must be a valid https URL.");
   }
-  if (url.protocol !== "https:") throw new Error("url must be https.");
+  if (url.protocol !== "https:") throw new SafeError("url must be https.");
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  const addresses = net.isIP(host) ? [{ address: host }] : await lookupImpl(host, { all: true });
-  if (!addresses.length || addresses.some((a) => isPrivateAddress(a.address))) throw new Error("url must point to a public host.");
+  if (net.isIP(host) && isPrivateAddress(host)) throw new SafeError(NOT_ALLOWED);
+  return { url, host };
+}
+
+/** https only, and never a non-public address, literal or resolved. Returns the URL and the ONE address to connect to. */
+async function resolvePublicHttps(raw, lookupImpl, deadline) {
+  const { url, host } = parsePublicHttps(raw);
+  const addresses = net.isIP(host) ? [{ address: host }] : await withDeadline(Promise.resolve(lookupImpl(host, { all: true })), deadline);
+  if (!addresses.length || addresses.some((a) => isPrivateAddress(a.address))) throw new SafeError(NOT_ALLOWED);
   return { url, address: addresses[0].address };
 }
 
-/** GET over https connecting to exactly `address` (the one that was checked): a second DNS answer cannot redirect the
- *  connection. The Host header and the TLS servername stay the hostname. The body is cut off past the size cap. */
-function pinnedGet(url, address) {
+/** GET (or HEAD) over https connecting to exactly `address` (the one that was checked): a second DNS answer cannot redirect the
+ *  connection. The Host header and the TLS servername stay the hostname. Each socket idles out after 30 s, the whole download has
+ *  a deadline, and the body is cut off the moment it passes the size cap rather than after buffering. */
+export function pinnedGet(url, address, { method = "GET", deadline = Date.now() + DOWNLOAD_DEADLINE_MS, requestImpl = https.request, socketTimeoutMs = SOCKET_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
     const family = net.isIPv6(address) ? 6 : 4;
-    const req = https.request(url, { method: "GET", lookup: (_host, opts, cb) => (opts?.all ? cb(null, [{ address, family }]) : cb(null, address, family)), servername: net.isIP(url.hostname) ? undefined : url.hostname }, (res) => {
+    let deadlineTimer;
+    const req = requestImpl(url, { method, lookup: (_host, opts, cb) => (opts?.all ? cb(null, [{ address, family }]) : cb(null, address, family)), servername: net.isIP(url.hostname) ? undefined : url.hostname }, (res) => {
       const chunks = [];
       let size = 0;
       res.on("data", (c) => {
         size += c.length;
         if (size > MAX_VIDEO_BYTES) {
-          req.destroy(new Error("That video is over 100 MB."));
+          const err = new SafeError("That video is over 100 MB.");
+          req.destroy(err);
+          reject(err);
           return;
         }
         chunks.push(c);
       });
       res.on("end", () => {
+        clearTimeout(deadlineTimer);
         const headers = new Headers();
         for (const [k, v] of Object.entries(res.headers)) if (typeof v === "string") headers.set(k, v);
         const status = res.statusCode ?? 0;
-        resolve(new Response([204, 205, 304].includes(status) || (status >= 300 && status < 400) ? null : Buffer.concat(chunks), { status, headers }));
+        resolve(new Response(method === "HEAD" || [204, 205, 304].includes(status) || (status >= 300 && status < 400) ? null : Buffer.concat(chunks), { status, headers }));
       });
       res.on("error", reject);
     });
-    req.on("error", reject);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      req.destroy(new Error("deadline"));
+    } else {
+      deadlineTimer = setTimeout(() => req.destroy(new Error("deadline")), remaining);
+    }
+    req.setTimeout(socketTimeoutMs, () => req.destroy(new Error("timeout")));
+    req.on("error", (err) => {
+      clearTimeout(deadlineTimer);
+      reject(err);
+    });
     req.end();
   });
 }
@@ -145,22 +216,50 @@ function pinnedGet(url, address) {
 /** The video-source getter, replaceable by tests that must not touch the network. */
 export const videoSource = { get: pinnedGet };
 
-async function downloadVideo(rawUrl, { lookupImpl }) {
-  let target = await resolvePublicHttps(rawUrl, lookupImpl);
+/** Follows redirects (each hop checked and pinned on its own) and returns the final response. `method` is GET or HEAD. */
+async function fetchVideo(rawUrl, { lookupImpl, method, deadline }) {
+  let target = await resolvePublicHttps(rawUrl, lookupImpl, deadline);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const res = await videoSource.get(target.url, target.address);
+    const res = await videoSource.get(target.url, target.address, { method, deadline });
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
-      target = await resolvePublicHttps(new URL(res.headers.get("location"), target.url).toString(), lookupImpl);
+      target = await resolvePublicHttps(new URL(res.headers.get("location"), target.url).toString(), lookupImpl, deadline);
       continue;
     }
-    if (res.status < 200 || res.status >= 300) throw new Error(`Could not fetch the video: ${res.status}.`);
-    const declared = Number(res.headers.get("content-length"));
-    if (declared > MAX_VIDEO_BYTES) throw new Error("That video is over 100 MB.");
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    if (bytes.byteLength > MAX_VIDEO_BYTES) throw new Error("That video is over 100 MB.");
-    return { bytes, contentType: (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase() };
+    if (res.status < 200 || res.status >= 300) throw new Error("source status");
+    return res;
   }
-  throw new Error("Too many redirects.");
+  throw new SafeError("Too many redirects.");
+}
+
+/** Never lets an internal detail (a fetched host's status, a TLS or DNS error) reach the caller. */
+async function guardedDownload(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    throw err instanceof SafeError ? err : new Error(DOWNLOAD_FAILED);
+  }
+}
+
+/** HEAD (pinned, same checks): the size and type the source claims, before anything is downloaded. */
+function probeVideo(rawUrl, { lookupImpl, deadline }) {
+  return guardedDownload(async () => {
+    const res = await fetchVideo(rawUrl, { lookupImpl, method: "HEAD", deadline });
+    const size = Number(res.headers.get("content-length"));
+    if (!res.headers.get("content-length") || !Number.isInteger(size) || size <= 0) throw new SafeError("That video's size isn't known, so it can't be uploaded. Pass byte_size if you know it.");
+    return { size, contentType: (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase() };
+  });
+}
+
+function downloadVideo(rawUrl, { lookupImpl, deadline, expectedSize }) {
+  return guardedDownload(async () => {
+    const res = await fetchVideo(rawUrl, { lookupImpl, method: "GET", deadline });
+    const declared = Number(res.headers.get("content-length"));
+    if (declared > MAX_VIDEO_BYTES) throw new SafeError("That video is over 100 MB.");
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength > MAX_VIDEO_BYTES) throw new SafeError("That video is over 100 MB.");
+    if (bytes.byteLength !== expectedSize) throw new SafeError("That video's size changed while downloading.");
+    return { bytes, contentType: (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase() };
+  });
 }
 
 const TYPE_BY_EXT = { ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm" };
@@ -191,16 +290,19 @@ export function createMediaTools({ request, allowPath = false, fetchImpl = (...a
     throw last;
   }
 
-  async function upload(bytes, contentType, filename) {
-    const created = await request("POST", "/api/v1/media", { kind: "video", byte_size: bytes.byteLength, content_type: contentType, ...(filename ? { filename } : {}) });
+  /** Creates the asset: salt-api's creator and switch checks answer here, before any bytes move. */
+  function createAsset(byteSize, contentType, filename) {
+    return request("POST", "/api/v1/media", { kind: "video", byte_size: byteSize, content_type: contentType, ...(filename ? { filename } : {}) });
+  }
+
+  async function sendParts(created, bytes) {
     const { upload: plan } = created;
     const parts = [];
     for (const part of plan.parts) {
       const start = (part.n - 1) * plan.part_size;
       parts.push({ n: part.n, etag: await putPart(part.url, bytes.subarray(start, start + plan.part_size)) });
     }
-    const done = await request("POST", `/api/v1/media/${encodeURIComponent(created.media.id)}/complete`, { upload_id: plan.upload_id, parts });
-    return done.media;
+    return request("POST", `/api/v1/media/${encodeURIComponent(created.media.id)}/complete`, { upload_id: plan.upload_id, parts });
   }
 
   return {
@@ -235,28 +337,38 @@ export function createMediaTools({ request, allowPath = false, fetchImpl = (...a
     },
 
     /** Uploads a video (https URL, or a local file path on the local server) and returns it in state "processing". */
-    async uploadVideo({ url, path, content_type, filename } = {}) {
+    async uploadVideo({ url, path, content_type, filename, byte_size } = {}) {
       if (Boolean(url) === Boolean(path)) throw new Error("Give exactly one of url or path.");
-      let bytes;
       let type = typeof content_type === "string" ? content_type.trim().toLowerCase() : "";
       let name = typeof filename === "string" && filename.trim() ? filename.trim() : undefined;
       if (path) {
         if (!allowPath) throw new Error("path is only available on the local server. Pass an https url instead.");
         const info = await stat(path);
         if (info.size > MAX_VIDEO_BYTES) throw new Error("That video is over 100 MB.");
-        bytes = new Uint8Array(await readFile(path));
+        const bytes = new Uint8Array(await readFile(path));
         const ext = String(path).slice(String(path).lastIndexOf(".")).toLowerCase();
         type = type || TYPE_BY_EXT[ext] || "";
         name = name ?? String(path).split(/[\\/]/).pop();
-      } else {
-        const got = await downloadVideo(String(url), { lookupImpl });
-        bytes = got.bytes;
-        type = type || got.contentType;
-        name = name ?? (new URL(String(url)).pathname.split("/").pop() || undefined);
+        if (!VIDEO_TYPES.has(type)) throw new Error("Videos must be video/mp4, video/quicktime or video/webm. Pass content_type if the source did not say.");
+        if (bytes.byteLength === 0) throw new Error("That video is empty.");
+        return { media: summarizeMedia((await sendParts(await createAsset(bytes.byteLength, type, name), bytes)).media) };
       }
+      // The API is asked first (it refuses a non-creator or a closed switch), so a refused account never makes this server fetch anything.
+      const target = parsePublicHttps(String(url)).url;
+      const deadline = Date.now() + DOWNLOAD_DEADLINE_MS;
+      let size = byte_size != null ? Number(byte_size) : NaN;
+      if (byte_size == null || !type) {
+        const head = await probeVideo(String(url), { lookupImpl, deadline });
+        if (byte_size == null) size = head.size;
+        type = type || head.contentType;
+      }
+      if (!Number.isInteger(size) || size <= 0) throw new Error("byte_size must be a positive whole number.");
+      if (size > MAX_VIDEO_BYTES) throw new Error("That video is over 100 MB.");
       if (!VIDEO_TYPES.has(type)) throw new Error("Videos must be video/mp4, video/quicktime or video/webm. Pass content_type if the source did not say.");
-      if (bytes.byteLength === 0) throw new Error("That video is empty.");
-      return { media: summarizeMedia(await upload(bytes, type, name)) };
+      name = name ?? (target.pathname.split("/").pop() || undefined);
+      const created = await createAsset(size, type, name);
+      const got = await downloadVideo(String(url), { lookupImpl, deadline, expectedSize: size });
+      return { media: summarizeMedia((await sendParts(created, got.bytes)).media) };
     },
 
     /** POST /api/v1/video_posts for a new asset, or PATCH /api/v1/video_posts/:id {status: "published"} for a draft (a recording). */
@@ -449,6 +561,7 @@ export const MEDIA_TOOL_METADATA = [
         url: { type: "string", description: "A public https URL to the video file." },
         content_type: { type: "string", enum: ["video/mp4", "video/quicktime", "video/webm"], description: "Needed only if the URL's response does not say." },
         filename: { type: "string" },
+        byte_size: { type: "integer", description: "The file's exact size in bytes, if you know it. Saves a size check against the URL first." },
       },
       required: ["url"],
     },
