@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMediaTools, runMediaTool, toMediaMcpTools, MEDIA_TOOL_METADATA, MEDIA_TOOL_NAMES } from "../src/media-tools.mjs";
+import { videoSource, createMediaTools, runMediaTool, toMediaMcpTools, MEDIA_TOOL_METADATA, MEDIA_TOOL_NAMES } from "../src/media-tools.mjs";
 
 const CHAT = "11111111-1111-1111-1111-111111111111";
 const LIVE = "Lq3f8aZkP2xVnR7tYb1HdA";
@@ -24,6 +24,10 @@ function fakeRequest(routes) {
   };
 }
 
+// The video getter (pinned to the checked address in production) answers from the latest externalFetch in these tests.
+let lastExternal;
+videoSource.get = async (url) => lastExternal(url.toString(), {});
+
 const publicLookup = async () => [{ address: "93.184.216.34" }];
 
 /** Third-party hosts only: the video source, presigned part URLs, the transcript CDN. */
@@ -37,7 +41,18 @@ function externalFetch(handlers) {
     return h(u, init, calls.length);
   };
   fn.calls = calls;
+  lastExternal = fn;
   return fn;
+}
+
+/** Replaces the pinned video getter: handlers get (url, address) and the call is recorded. */
+function stubVideoSource(handler) {
+  const calls = [];
+  videoSource.get = async (url, address) => {
+    calls.push({ url: url.toString(), address });
+    return handler(url, address);
+  };
+  return calls;
 }
 
 const bytesResponse = (bytes, type = "video/mp4", status = 200, headers = {}) =>
@@ -264,4 +279,34 @@ test("toMediaMcpTools: only the local variant offers a file path for upload", ()
   assert.ok(local.inputSchema.properties.path);
   assert.deepEqual(local.inputSchema.required, []);
   assert.equal(hosted.annotations.title, hosted.title);
+});
+
+test("the video fetch connects to the address that was checked, even if DNS answers differently the second time", async () => {
+  const { request } = fakeRequest({
+    "POST /api/v1/media": { media: { id: MEDIA }, upload: { upload_id: "u1", part_size: 4, parts: [{ n: 1, url: "https://s3.test/p1" }] } },
+    [`POST /api/v1/media/${MEDIA}/complete`]: { media: { id: MEDIA, state: "processing" } },
+  });
+  let lookups = 0;
+  const rebinding = async () => [{ address: ++lookups === 1 ? "93.184.216.34" : "127.0.0.1" }];
+  const seen = stubVideoSource((url) => (url.pathname === "/hop" ? new Response("", { status: 302, headers: { location: "https://other.test/a.mp4" } }) : bytesResponse([1])));
+  const ext = externalFetch({ "s3.test": () => new Response("", { status: 200, headers: { ETag: '"e"' } }) });
+  const tools = createMediaTools({ request, fetchImpl: ext, lookupImpl: rebinding });
+  await tools.uploadVideo({ url: "https://clips.test/a.mp4" });
+  assert.deepEqual(seen, [{ url: "https://clips.test/a.mp4", address: "93.184.216.34" }]);
+  assert.equal(lookups, 1);
+  // The second DNS answer is loopback: a fresh lookup is refused outright, so nothing is fetched.
+  await assert.rejects(() => tools.uploadVideo({ url: "https://clips.test/hop" }), /public host/);
+  assert.equal(seen.length, 1);
+});
+
+test("each redirect hop is resolved and pinned to its own checked address", async () => {
+  const { request } = fakeRequest({
+    "POST /api/v1/media": { media: { id: MEDIA }, upload: { upload_id: "u1", part_size: 4, parts: [{ n: 1, url: "https://s3.test/p1" }] } },
+    [`POST /api/v1/media/${MEDIA}/complete`]: { media: { id: MEDIA, state: "processing" } },
+  });
+  const lookup = async (host) => [{ address: host === "clips.test" ? "93.184.216.34" : "93.184.216.35" }];
+  const seen = stubVideoSource((url) => (url.hostname === "clips.test" ? new Response("", { status: 302, headers: { location: "https://cdn.test/a.mp4" } }) : bytesResponse([1])));
+  const ext = externalFetch({ "s3.test": () => new Response("", { status: 200, headers: { ETag: '"e"' } }) });
+  await createMediaTools({ request, fetchImpl: ext, lookupImpl: lookup }).uploadVideo({ url: "https://clips.test/a.mp4" });
+  assert.deepEqual(seen.map((c) => c.address), ["93.184.216.34", "93.184.216.35"]);
 });

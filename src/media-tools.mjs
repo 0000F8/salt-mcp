@@ -15,6 +15,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import net from "node:net";
+import https from "node:https";
 
 const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const CHAT_ID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)$/;
@@ -97,8 +98,8 @@ function isPrivateAddress(address) {
   return v6 === "::" || v6 === "::1" || v6.startsWith("fc") || v6.startsWith("fd") || v6.startsWith("fe8") || v6.startsWith("fe9") || v6.startsWith("fea") || v6.startsWith("feb");
 }
 
-/** https only, and never an address inside the host's own network: the hosted server fetches on a caller's say-so. */
-async function assertPublicHttpsUrl(raw, lookupImpl) {
+/** https only, and never an address inside the host's own network. Returns the URL and the ONE address to connect to. */
+async function resolvePublicHttps(raw, lookupImpl) {
   let url;
   try {
     url = new URL(raw);
@@ -109,18 +110,50 @@ async function assertPublicHttpsUrl(raw, lookupImpl) {
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const addresses = net.isIP(host) ? [{ address: host }] : await lookupImpl(host, { all: true });
   if (!addresses.length || addresses.some((a) => isPrivateAddress(a.address))) throw new Error("url must point to a public host.");
-  return url;
+  return { url, address: addresses[0].address };
 }
 
-async function downloadVideo(rawUrl, { fetchImpl, lookupImpl }) {
-  let url = await assertPublicHttpsUrl(rawUrl, lookupImpl);
+/** GET over https connecting to exactly `address` (the one that was checked): a second DNS answer cannot redirect the
+ *  connection. The Host header and the TLS servername stay the hostname. The body is cut off past the size cap. */
+function pinnedGet(url, address) {
+  return new Promise((resolve, reject) => {
+    const family = net.isIPv6(address) ? 6 : 4;
+    const req = https.request(url, { method: "GET", lookup: (_host, _opts, cb) => cb(null, address, family), servername: net.isIP(url.hostname) ? undefined : url.hostname }, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on("data", (c) => {
+        size += c.length;
+        if (size > MAX_VIDEO_BYTES) {
+          req.destroy(new Error("That video is over 100 MB."));
+          return;
+        }
+        chunks.push(c);
+      });
+      res.on("end", () => {
+        const headers = new Headers();
+        for (const [k, v] of Object.entries(res.headers)) if (typeof v === "string") headers.set(k, v);
+        const status = res.statusCode ?? 0;
+        resolve(new Response([204, 205, 304].includes(status) || (status >= 300 && status < 400) ? null : Buffer.concat(chunks), { status, headers }));
+      });
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+/** The video-source getter, replaceable by tests that must not touch the network. */
+export const videoSource = { get: pinnedGet };
+
+async function downloadVideo(rawUrl, { lookupImpl }) {
+  let target = await resolvePublicHttps(rawUrl, lookupImpl);
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const res = await fetchImpl(url.toString(), { redirect: "manual" });
+    const res = await videoSource.get(target.url, target.address);
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
-      url = await assertPublicHttpsUrl(new URL(res.headers.get("location"), url).toString(), lookupImpl);
+      target = await resolvePublicHttps(new URL(res.headers.get("location"), target.url).toString(), lookupImpl);
       continue;
     }
-    if (!res.ok) throw new Error(`Could not fetch the video: ${res.status}.`);
+    if (res.status < 200 || res.status >= 300) throw new Error(`Could not fetch the video: ${res.status}.`);
     const declared = Number(res.headers.get("content-length"));
     if (declared > MAX_VIDEO_BYTES) throw new Error("That video is over 100 MB.");
     const bytes = new Uint8Array(await res.arrayBuffer());
@@ -135,7 +168,7 @@ const TYPE_BY_EXT = { ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "
 /**
  * @param {{request: (method: string, path: string, body?: object) => Promise<any>,
  *          allowPath?: boolean, fetchImpl?: typeof fetch, lookupImpl?: Function}} deps
- *  `fetchImpl` is for third-party hosts only (the video source, the presigned part URLs, the transcript CDN): it must
+ *  `fetchImpl` is for third-party hosts only (the presigned part URLs, the transcript CDN; the video source uses `videoSource`, pinned to the checked address): it must
  *  never be the Salt client's fetch, which carries edge headers meant for Salt alone.
  *  `allowPath` is the local server only: a hosted server must never read its own disk for a caller.
  */
@@ -216,7 +249,7 @@ export function createMediaTools({ request, allowPath = false, fetchImpl = (...a
         type = type || TYPE_BY_EXT[ext] || "";
         name = name ?? String(path).split(/[\\/]/).pop();
       } else {
-        const got = await downloadVideo(String(url), { fetchImpl, lookupImpl });
+        const got = await downloadVideo(String(url), { lookupImpl });
         bytes = got.bytes;
         type = type || got.contentType;
         name = name ?? (new URL(String(url)).pathname.split("/").pop() || undefined);
