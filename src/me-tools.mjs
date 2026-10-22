@@ -20,10 +20,13 @@ import { randomUUID } from "node:crypto";
 import { toolResult } from "./tool-result.mjs";
 import { cleanMessageText, previewText } from "./me-markers.mjs";
 import { buildGuard, guardBody, sendWithFreshKeys } from "./send-guard.mjs";
+import { createLive } from "./me-live.mjs";
 import { encryptForKeys, decryptAttachmentBytes, ENCRYPTED_PLACEHOLDER, MAX_ATTACHMENT_BYTES } from "./me-crypto.mjs";
 
 const PLAIN_ID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]+)$/;
 const PAGE_SIZE = 10;
+const DEFAULT_WAIT_S = 120;
+const MAX_WAIT_S = 600;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 const PREVIEW_CHARS = 120;
@@ -134,6 +137,54 @@ const READ_TOOLS = [
   },
 ];
 
+const LIVE_TOOLS = [
+  {
+    name: "salt_me_wait",
+    title: "Wait for a new Salt message",
+    description:
+      "Waits on Salt's live socket (no polling) until a new message arrives in one chat (chat_id or name) or in ANY chat when none is given, then returns it " +
+      "in the shape salt_me_read_chat uses, decrypted on this computer. With after_message_id (needs a chat) it returns at once whatever already arrived after that message. " +
+      "Messages the owner sent are left out unless from is \"anyone\". Returns {messages: [], timed_out: true} after timeout_s (default 120, up to 600). " +
+      `Reading never marks anything as read. ${DATA_NOTE}`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat_id: ID_PROP,
+        name: { type: "string", description: "A chat or person name, used when chat_id is not known." },
+        after_message_id: { type: "string", description: "Return what arrived after this message id (needs a chat)." },
+        timeout_s: { type: "integer", minimum: 1, maximum: MAX_WAIT_S, description: `How long to wait, in seconds. Default ${DEFAULT_WAIT_S}, up to ${MAX_WAIT_S}.` },
+        from: { type: "string", enum: ["others", "anyone"], description: "Whose messages count. Default others (not the owner's own)." },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: "Wait for a new Salt message", ...READ_ANNOTATIONS, openWorldHint: true },
+  },
+  {
+    name: "salt_me_watch",
+    title: "Watch a Salt chat",
+    description:
+      "Adds a chat to (or, with on=false, removes it from) the watch list. New messages in a watched chat are pushed into the session as channel notifications as they arrive " +
+      "(Claude Code must be started with the development-channels flag for server:salt-me; otherwise they are ignored). Only watched chats are ever pushed. Returns the watch list.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        chat_id: ID_PROP,
+        name: { type: "string", description: "A chat or person name, used when chat_id is not known." },
+        on: { type: "boolean", description: "true (default) to watch, false to stop." },
+      },
+      additionalProperties: false,
+    },
+    annotations: { title: "Watch a Salt chat", ...READ_ANNOTATIONS, openWorldHint: true },
+  },
+  {
+    name: "salt_me_live_status",
+    title: "Live connection status",
+    description: "Says whether the live socket is connected, since when, when the last message arrived, which chats are watched and how many times it reconnected. Opens nothing.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    annotations: { title: "Live connection status", ...READ_ANNOTATIONS },
+  },
+];
+
 const SEND_TOOL = {
   name: "salt_me_send",
   title: "Send a Salt message as the owner",
@@ -154,7 +205,7 @@ const SEND_TOOL = {
   annotations: { title: "Send a Salt message as the owner", readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
 };
 
-export const ME_READ_TOOL_NAMES = new Set(READ_TOOLS.map((t) => t.name));
+export const ME_READ_TOOL_NAMES = new Set([...READ_TOOLS, ...LIVE_TOOLS].map((t) => t.name));
 export const ME_SEND_TOOL_NAME = SEND_TOOL.name;
 
 // ---------- chat shape (ports of salt-fe src/utilities/chat.js) ----------
@@ -248,7 +299,7 @@ const clip = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text
 /**
  * @param {{session: ReturnType<typeof import('./me-session.mjs').createMeSession>, readOnly?: boolean}} deps
  */
-export function createMeHandlers({ session, readOnly = false, host }) {
+export function createMeHandlers({ session, readOnly = false, host, liveOptions = {} }) {
   const attachmentCache = new Map(); // message id -> resource (ciphertext only)
 
   const meId = () => session.me?.id ?? null;
@@ -555,7 +606,75 @@ export function createMeHandlers({ session, readOnly = false, host }) {
     return { sent: true, message_id: String(posted?.id ?? posted?.message_id ?? ""), chat_id: id, chat_name: desc.name };
   }
 
-  const tools = [...READ_TOOLS, ...(readOnly ? [] : [SEND_TOOL])];
+  // ---------- live (me-live.mjs) ----------
+
+  const chatInfoCache = new Map(); // chat id -> {name, users}
+  async function chatInfo(chatId) {
+    const hit = chatInfoCache.get(chatId);
+    if (hit) return hit;
+    const page = await session.get(`/api/v1/chats/${encodeURIComponent(chatId)}`);
+    const s = page?.session;
+    const msgs = (Array.isArray(page?.messages) ? page.messages : []).slice().sort((a, b) => messageTime(a) - messageTime(b));
+    const newest = msgs.at(-1);
+    const info = { name: s ? describeChat(s, meId()).name : chatId, users: new Map((s?.users || []).map((u) => [u.id, u])), newestId: newest ? String(newest.id ?? newest.message_id) : null };
+    chatInfoCache.set(chatId, info);
+    if (chatInfoCache.size > 200) chatInfoCache.delete(chatInfoCache.keys().next().value);
+    return info;
+  }
+
+  async function liveDecode(msg) {
+    if (ROOM_CARD_EVENTS.has(msg.event_type)) return null;
+    const chatId = String(msg.chat_id);
+    const info = await chatInfo(chatId);
+    const me = meId();
+    const sender = info.users.get(msg.created_by) || msg.user || {};
+    const senderId = sender.id ?? msg.created_by;
+    const mine = Boolean(me && (msg.created_by === me || msg.user?.id === me || senderId === me));
+    const body = await bodyOf(msg).catch(() => ENCRYPTED_PLACEHOLDER);
+    const text = body ? (msg.event_type ? body : wrapData(body)) : resourceLabel(msg) || "";
+    const out = {
+      id: String(msg.id),
+      chat: { id: chatId, name: info.name },
+      time: msg.created_at ?? null,
+      from: { name: displayName(sender), handle: sender.username ? `@${sender.username}` : null, type: accountType(sender), me: mine },
+      text,
+    };
+    if (msg.reply_to_message_id) out.reply_to = { id: String(msg.reply_to_message_id) };
+    if (msg.resource_type === "Attachment") out.attachment = true;
+    else if (resourceLabel(msg)) out.resource = msg.resource_type;
+    return { mine, text: body, deleted: Boolean(msg.deleted_at), out };
+  }
+
+  const live = createLive({
+    session,
+    decode: liveDecode,
+    chatMeta: async (chatId) => {
+      const info = await chatInfo(chatId);
+      return { name: info.name, newestId: info.newestId };
+    },
+    ...liveOptions,
+  });
+
+  async function waitTool(args) {
+    if (args.from !== undefined && !["others", "anyone"].includes(args.from)) throw new Error("from must be others or anyone.");
+    const timeout = args.timeout_s === undefined ? DEFAULT_WAIT_S : Number(args.timeout_s);
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > MAX_WAIT_S) throw new Error(`timeout_s must be a whole number from 1 to ${MAX_WAIT_S}.`);
+    if (args.after_message_id !== undefined && !PLAIN_ID_RE.test(String(args.after_message_id))) throw new Error("after_message_id must be a plain Salt message id.");
+    const hasChat = (args.chat_id !== undefined && args.chat_id !== null && args.chat_id !== "") || (args.name && String(args.name).trim());
+    if (args.after_message_id !== undefined && !hasChat) throw new Error("after_message_id needs a chat_id or name.");
+    await session.ensureUnlocked();
+    const chat_id = hasChat ? await resolveChatId(args) : null;
+    return live.wait({ chat_id, after_message_id: args.after_message_id === undefined ? null : String(args.after_message_id), timeout_s: timeout, from: args.from ?? "others" });
+  }
+
+  async function watchTool(args) {
+    if (args.on !== undefined && typeof args.on !== "boolean") throw new Error("on must be true or false.");
+    await session.ensureUnlocked();
+    const id = await resolveChatId(args);
+    return { watching: await live.watch(id, args.on ?? true) };
+  }
+
+  const tools = [...READ_TOOLS, ...LIVE_TOOLS, ...(readOnly ? [] : [SEND_TOOL])];
 
   async function run(name, args) {
     switch (name) {
@@ -574,6 +693,12 @@ export function createMeHandlers({ session, readOnly = false, host }) {
         return readAttachment(args);
       case "salt_me_whoami":
         return whoami();
+      case "salt_me_wait":
+        return waitTool(args);
+      case "salt_me_watch":
+        return watchTool(args);
+      case "salt_me_live_status":
+        return live.status();
       case SEND_TOOL.name:
         return send(args);
       default:
@@ -583,6 +708,7 @@ export function createMeHandlers({ session, readOnly = false, host }) {
 
   return {
     toolCount: tools.length,
+    live,
     listTools: () => tools.map((t) => ({ ...t })),
     async callTool(name, args = {}) {
       const result = await run(name, args);

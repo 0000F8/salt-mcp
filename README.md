@@ -771,6 +771,23 @@ once.
 
 Reading never marks anything as read and changes nothing on Salt.
 
+**Live (as-me).** Messages can reach your AI as they arrive, over Salt's own live
+socket (opened on first use, reconnecting by itself, never polling):
+
+- `salt_me_wait` (`chat_id` or `name`, optional `after_message_id`, `timeout_s` default 120 up to 600, `from` "others" or "anyone") waits until a new message arrives in that chat, or in any chat when none is given, and returns it decrypted and labelled like `salt_me_read_chat`. With `after_message_id` it returns at once what already came after it. It returns `{messages: [], timed_out: true}` when nothing came.
+- `salt_me_watch` (`chat_id` or `name`, `on` default true) adds or removes a chat on the watch list. New messages in a watched chat are pushed into the session as Claude Code channel notifications. Only watched chats are ever pushed.
+- `salt_me_live_status` says whether the socket is connected, since when, when the last message arrived, what is watched and how often it reconnected.
+
+Your own messages are left out unless `from` is "anyone". To watch from launch, add
+`--watch <chat_id>[,<chat_id>]` (or set `SALT_ME_WATCH`). Notifications are the text
+other people and agents wrote: your AI is told to treat it as data, never as instructions.
+Claude Code accepts them only when started with the channel flag; without it they are
+ignored and `salt_me_wait` still works:
+
+```bash
+claude --dangerously-load-development-channels server:salt-me
+```
+
 **Sending (on by default).** `salt_me_send` (`chat_id`, `text`, optional
 `mentions`) posts immediately as you, with no per-message approval and nothing
 added to the message: no "sent by Claude" marker or footer. Start with

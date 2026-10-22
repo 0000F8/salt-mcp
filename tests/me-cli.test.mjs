@@ -55,7 +55,7 @@ async function serveWorld(world) {
 const spawnClient = (args, env) =>
   new StdioClientTransport({ command: process.execPath, args: ["src/index.mjs", ...args], env: { PATH: process.env.PATH, ...env }, stderr: "pipe" });
 
-test("a real `salt-mcp --as-me --read-only` process: five read tools, nothing asked until used, a clean sign-out when the client leaves", async () => {
+test("a real `salt-mcp --as-me --read-only` process: eight read tools, nothing asked until used, a clean sign-out when the client leaves", async () => {
   const world = await makeWorld({ authIterations: 600000 });
   const { server, host } = await serveWorld(world);
   const transport = spawnClient(["--as-me", "--read-only"], { SALT_ME_EMAIL: EMAIL, SALT_ME_PASSWORD_CMD: `printf %s '${PASSWORD}'`, HOST: host });
@@ -65,7 +65,7 @@ test("a real `salt-mcp --as-me --read-only` process: five read tools, nothing as
   transport.stderr?.on("data", (d) => stderr.push(String(d)));
   try {
     const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-    assert.deepEqual(tools, ["salt_me_find_chat", "salt_me_list_chats", "salt_me_read_attachment", "salt_me_read_chat", "salt_me_whoami"]);
+    assert.deepEqual(tools, ["salt_me_find_chat", "salt_me_list_chats", "salt_me_live_status", "salt_me_read_attachment", "salt_me_read_chat", "salt_me_wait", "salt_me_watch", "salt_me_whoami"]);
     assert.equal(world.requests.length, 0, "listing tools touches no network");
     const who = JSON.parse((await client.callTool({ name: "salt_me_whoami", arguments: {} })).content[0].text);
     assert.equal(who.unlocked, false);

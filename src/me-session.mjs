@@ -350,6 +350,16 @@ export function createMeSession({ host = DEFAULT_HOST, email = null, readEmail, 
     get me() {
       return user;
     },
+    get host() {
+      return base;
+    },
+    /** What the live socket needs: the websocket address and the raw token (no "Bearer "), after sign-in/unlock. */
+    liveAuth: async () => {
+      await ensureUnlocked();
+      const raw = String(token || "").replace(/^Bearer\s+/i, "");
+      if (!raw) throw new MeError("Not signed in.", { kind: "sign_in" });
+      return { url: `${base.replace(/^http/, "ws")}/cable`, token: raw };
+    },
     get status() {
       const link = linkMode ? linkClient.read() : null;
       return {

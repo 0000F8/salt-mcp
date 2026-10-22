@@ -57,7 +57,7 @@ test("nothing happens until the first tool call: no sign-in, no password asked",
 test("tools: salt_me_send is present by default and absent with --read-only; every tool is annotated", async () => {
   const world = await makeWorld();
   const names = (h) => h.listTools().map((t) => t.name).sort();
-  assert.deepEqual(names(handlersFor(world, { readOnly: true })), ["salt_me_find_chat", "salt_me_list_chats", "salt_me_read_attachment", "salt_me_read_chat", "salt_me_whoami"]);
+  assert.deepEqual(names(handlersFor(world, { readOnly: true })), ["salt_me_find_chat", "salt_me_list_chats", "salt_me_live_status", "salt_me_read_attachment", "salt_me_read_chat", "salt_me_wait", "salt_me_watch", "salt_me_whoami"]);
   const withSend = handlersFor(world);
   assert.ok(names(withSend).includes("salt_me_send"));
   for (const tool of withSend.listTools()) {
@@ -389,7 +389,7 @@ test("over MCP: results are JSON text with structuredContent, an image comes bac
   const world = await makeWorld();
   const { client, close } = await connect(world);
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 6);
+  assert.equal(tools.length, 9);
   const list = await client.callTool({ name: "salt_me_list_chats", arguments: {} });
   assert.equal(JSON.parse(textOf(list)).length, 4);
   const pic = await client.callTool({ name: "salt_me_read_attachment", arguments: { message_id: world.attachmentMessages.pic.id } });
