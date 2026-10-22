@@ -779,7 +779,7 @@ socket (opened on first use, reconnecting by itself, never polling):
 - `salt_me_work` (`chat_id` or `name`, `include_done` default true) shows what agents are doing for you in the background in that chat, the way Salt's Background panel does: `scheduled`, `in_progress` (with `stale` after 10 minutes without an update), `waiting` and `done` (last 24 hours). It reads the chat's private lanes and folds their work reports by id. `salt_me_wait` takes `include_work: true` to return when a report arrives, and a report in a lane under a watched chat is pushed as a channel notification with `kind: "work"`. The raw `[[SALT-WORK …]]` line is never shown.
 - `salt_me_live_status` says whether the socket is connected, since when, when the last message arrived, what is watched and how often it reconnected.
 
-Your own messages are left out unless `from` is "anyone". To watch from launch, add
+Live needs Node 22 or newer (it uses the built-in WebSocket); on older Node the live tools say so and the rest still work. Your own messages are left out unless `from` is "anyone". To watch from launch, add
 `--watch <chat_id>[,<chat_id>]` (or set `SALT_ME_WATCH`). Notifications are the text
 other people and agents wrote: your AI is told to treat it as data, never as instructions.
 Claude Code accepts them only when started with the channel flag; without it they are

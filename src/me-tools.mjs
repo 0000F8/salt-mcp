@@ -673,6 +673,7 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
     session,
     decode: liveDecode,
     decodeWork,
+    lanesOf,
     chatMeta: async (chatId) => {
       const info = await chatInfo(chatId);
       return { name: info.name, newestId: info.newestId };
@@ -728,11 +729,14 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
     let page = await session.get(`/api/v1/chats/${encodeURIComponent(laneId)}`);
     const others = (page?.session?.users || []).filter((u) => u.id !== meId());
     if (others.length) withName = others.map(displayName).join(", ");
+    const laneUsers = new Map((page?.session?.users || []).map((u) => [u.id, u]));
     for (let pages = 1; pages <= 6; pages++) {
       const batch = Array.isArray(page?.messages) ? page.messages : [];
       let found = 0;
       for (const m of batch) {
         if (m.event_type || (meId() && (m.created_by === meId() || m.user?.id === meId()))) continue;
+        // The web reads work on AGENT lanes only: a person's forged report is not work.
+        if ((m.user || laneUsers.get(m.created_by))?.account_type !== "Agent") continue;
         const report = parseWorkReport(await rawBodyOf(m).catch(() => null));
         if (!report) continue;
         found++;
@@ -754,7 +758,7 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
     const items = [];
     for (const lane of lanes) {
       const laneId = String(lane?.id ?? lane?.chat_id ?? "");
-      if (!PLAIN_ID_RE.test(laneId)) continue;
+      if (!PLAIN_ID_RE.test(laneId) || lane?.with?.account_type !== "Agent") continue;
       const hint = typeof lane.with === "string" ? lane.with : lane.with?.display_name || lane.with?.username || null;
       items.push(...(await laneReports(laneId, hint).catch(() => [])));
     }
@@ -770,9 +774,10 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
     };
   }
 
-  const workOut = (shaped, msg) => ({
+  const workOut = (shaped, msg, sender = {}) => ({
     type: "work",
     ...shaped,
+    from: { name: displayName(sender), handle: sender.username ? `@${sender.username}` : null, type: accountType(sender), me: false },
     text: shaped.detail ? `${shaped.title}\n${shaped.detail}` : shaped.title,
     time: msg.created_at ?? null,
     chat: { id: String(msg.coaching_for_chat_id) },
@@ -788,8 +793,18 @@ export function createMeHandlers({ session, readOnly = false, host, liveOptions 
     const mine = Boolean(me && (msg.created_by === me || msg.user?.id === me));
     const lane = await chatInfo(String(msg.chat_id)).catch(() => null);
     const sender = msg.user || lane?.users.get(msg.created_by) || {};
+    if (sender.account_type !== "Agent") return null;
     const r = { ...report, laneId: String(msg.chat_id), stream: [], startedAt: Date.parse(msg.created_at || 0) || 0, updatedAt: Date.parse(msg.created_at || 0) || 0, agentName: displayName(sender), with: report.with || sender.username || null };
-    return { mine, title: report.title, out: workOut(shapeWork(r, Date.now()), msg) };
+    return { mine, title: report.title, out: workOut(shapeWork(r, Date.now()), msg, sender) };
+  }
+
+  /** The agent lanes under a chat, for the live catch-up (same rule as salt_me_work: lane partner must be an Agent). */
+  async function lanesOf(chatId) {
+    const page = await session.get(`/api/v1/chats/${encodeURIComponent(chatId)}`);
+    return (Array.isArray(page?.session?.sidechains) ? page.session.sidechains : [])
+      .filter((l) => l?.with?.account_type === "Agent" && PLAIN_ID_RE.test(String(l.id ?? l.chat_id ?? "")))
+      .map((l) => String(l.id ?? l.chat_id))
+      .slice(0, 30);
   }
 
   async function watchTool(args) {

@@ -17,12 +17,20 @@
 
 const RING_SIZE = 50;
 const SUBPROTOCOL = "actioncable-v1-json";
+const NEEDS_NODE22 = "Live needs Node 22 or newer (this Node has no built-in WebSocket). The other salt_me tools still work.";
 const FATAL_REASONS = new Set(["unauthorized", "device_unlinked", "invalid_request", "server_restart_never"]);
 
 const messageTime = (m) => ((m.seq ?? null) !== null ? Number(m.seq) : Date.parse(m.created_at || 0) || 0);
 
-/** A frame on the user stream is a chat message when it has no `type` and carries a chat and an id. */
-export const isMessageFrame = (p) => p && typeof p === "object" && !("type" in p) && p.chat_id !== undefined && p.chat_id !== null && p.id !== undefined && p.id !== null;
+/**
+ * A frame on the user stream is a chat message when it has no `type` and carries a chat and an id. The cable's
+ * payload is Message#formatted_message, which names the id `message_id` (REST rows say `id`): either counts.
+ */
+export const isMessageFrame = (p) =>
+  p && typeof p === "object" && !("type" in p) && p.chat_id !== undefined && p.chat_id !== null && ((p.id !== undefined && p.id !== null) || (p.message_id !== undefined && p.message_id !== null));
+
+/** What goes into a channel notification attribute: other people's words, so no quotes, brackets, backticks, control characters or newlines, 60 characters at most. */
+export const metaValue = (v) => String(v ?? "").replace(/[^\p{L}\p{N} ._\-@:/+#()]/gu, " ").replace(/ +/g, " ").trim().slice(0, 60);
 
 /**
  * @param {{
@@ -37,8 +45,8 @@ export const isMessageFrame = (p) => p && typeof p === "object" && !("type" in p
  * }} deps
  */
 export function createLive({
-  session, decode, decodeWork, chatMeta, notify,
-  WebSocketImpl = globalThis.WebSocket, now = () => Date.now(), random = Math.random,
+  session, decode, decodeWork, lanesOf, chatMeta, notify,
+  WebSocketImpl = globalThis.WebSocket, connectTimeoutMs = 15000, now = () => Date.now(), random = Math.random,
   setTimeoutImpl = setTimeout, clearTimeoutImpl = clearTimeout, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval,
   backoff = { base: 1000, max: 30000 }, pingTimeoutMs = 15000, livenessCheckMs = 5000, log = () => {},
 }) {
@@ -56,6 +64,11 @@ export function createLive({
   let retryTimer = null;
   let liveness = null;
   let queue = Promise.resolve();
+  let fatalToken = null; // the token in use when it went fatal: a different one (a relink) lifts it
+  let currentToken = null;
+  let connectTimer = null;
+  let downSince = 0; // when the last open socket was lost: the `since` of the catch-up
+  const newestLane = new Map(); // lane chat id -> newest message id seen
 
   const rings = new Map(); // chat id -> [{id, mine, text, deleted, out}]
   const newest = new Map(); // chat id -> newest message id seen
@@ -66,6 +79,7 @@ export function createLive({
 
   const failNow = (error) => {
     fatal = error;
+    fatalToken = currentToken;
     stopped = true;
     connected = false;
     teardown();
@@ -83,6 +97,8 @@ export function createLive({
     retryTimer = null;
     if (liveness) clearIntervalImpl(liveness);
     liveness = null;
+    if (connectTimer) clearTimeoutImpl(connectTimer);
+    connectTimer = null;
     const old = ws;
     ws = null;
     if (old) {
@@ -116,6 +132,7 @@ export function createLive({
     const id = String(msg.id);
     if (ring.some((e) => e.id === id)) return;
     const w = await decodeWork(msg);
+    newestLane.set(String(msg.chat_id), id);
     if (!w || w.mine) return;
     const entry = { id, mine: false, text: w.title, deleted: false, out: w.out };
     ring.push(entry);
@@ -180,16 +197,17 @@ export function createLive({
     try {
       await notifier({
         content: entry.out?.text ?? entry.text,
+        // Every value here is metaValue()d: names and handles are other people's words (the labelled text is `content`).
         meta: {
-          chat_id: chatId,
-          chat_name: String(watches.get(chatId)?.name ?? names.get(chatId) ?? ""),
-          message_id: entry.id,
-          sender: String(from.name ?? ""),
-          sender_handle: String(from.handle ?? ""),
-          sender_type: String(from.type ?? ""),
-          time: String(entry.out?.time ?? ""),
-          event,
-          ...(kind === "work" ? { kind: "work", status: String(entry.out?.status ?? ""), title: String(entry.text ?? "") } : {}),
+          chat_id: metaValue(chatId),
+          chat_name: metaValue(watches.get(chatId)?.name ?? names.get(chatId)),
+          message_id: metaValue(entry.id),
+          sender: metaValue(from.name),
+          sender_handle: metaValue(from.handle),
+          sender_type: metaValue(from.type),
+          time: metaValue(entry.out?.time),
+          event: metaValue(event),
+          ...(kind === "work" ? { kind: "work", status: metaValue(entry.out?.status) } : {}),
         },
       });
     } catch (err) {
@@ -203,30 +221,78 @@ export function createLive({
     w.resolve(timedOut ? { messages: [], timed_out: true } : { messages: w.entries.map((e) => e.out), timed_out: false });
   }
 
-  async function catchUp(chatId) {
-    const last = newest.get(chatId);
-    if (!last) return;
+  const norm = (m, chatId) => ({ ...m, chat_id: m.chat_id ?? chatId, id: m.id ?? m.message_id });
+  const sorted = (list) => list.slice().sort((a, b) => messageTime(a) - messageTime(b));
+
+  /**
+   * Fetches what came after `last` (default: the newest id seen) and ingests it; `since` also asks for older messages
+   * that CHANGED meanwhile (edits, tombstones), which are applied only to messages already known. Returns the ring
+   * entries of everything the fetch returned after the anchor.
+   */
+  async function catchUp(chatId, { last = newest.get(chatId), since: sinceMs = 0 } = {}) {
+    if (!last) return [];
     let page;
     try {
-      page = await session.get(`/api/v1/chats/${encodeURIComponent(chatId)}?last=${encodeURIComponent(last)}`);
+      const q = `?last=${encodeURIComponent(last)}${sinceMs ? `&since=${encodeURIComponent(new Date(sinceMs).toISOString())}` : ""}`;
+      page = await session.get(`/api/v1/chats/${encodeURIComponent(chatId)}${q}`);
     } catch (err) {
       log(`live: catch-up of chat ${chatId} failed: ${err?.message || err}`);
-      return;
+      return [];
     }
-    const batch = (Array.isArray(page?.messages) ? page.messages : []).map((m) => ({ ...m, chat_id: m.chat_id ?? chatId, id: m.id ?? m.message_id }));
-    batch.sort((a, b) => messageTime(a) - messageTime(b));
-    for (const m of batch) await ingest(m);
+    const out = [];
+    const ring = ringOf(chatId);
+    for (const m of sorted((Array.isArray(page?.changed_messages) ? page.changed_messages : []).map((x) => norm(x, chatId)))) {
+      if (ring.some((e) => e.id === String(m.id))) await ingest(m);
+    }
+    for (const m of sorted((Array.isArray(page?.messages) ? page.messages : []).map((x) => norm(x, chatId)))) {
+      await ingest(m);
+      const e = ringOf(chatId).find((x) => x.id === String(m.id));
+      if (e) out.push(e);
+    }
+    return out;
+  }
+
+  /** The agent lanes under a chat: new work reports since the last seen id; a lane never seen is only marked, never replayed. */
+  async function catchUpLane(parent, laneId, sinceMs) {
+    const last = newestLane.get(laneId);
+    try {
+      const q = last ? `?last=${encodeURIComponent(last)}` : "";
+      const page = await session.get(`/api/v1/chats/${encodeURIComponent(laneId)}${q}`);
+      const batch = sorted((Array.isArray(page?.messages) ? page.messages : []).map((x) => norm(x, laneId)));
+      if (!last) {
+        if (batch.length) newestLane.set(laneId, String(batch.at(-1).id));
+        return;
+      }
+      for (const m of batch) await ingest({ ...m, coaching_for_chat_id: m.coaching_for_chat_id ?? parent });
+    } catch (err) {
+      log(`live: catch-up of lane ${laneId} failed: ${err?.message || err}`);
+    }
   }
 
   async function resumed() {
+    const sinceMs = downSince;
     const chats = new Set(watches.keys());
+    const laneParents = new Set(watches.keys());
     let any = false;
     for (const w of waiters) {
-      if (w.chatId) chats.add(w.chatId);
-      else any = true;
+      if (w.chatId) {
+        chats.add(w.chatId);
+        if (w.includeWork) laneParents.add(w.chatId);
+      } else any = true;
     }
     if (any) for (const id of newest.keys()) chats.add(id);
-    for (const id of chats) await catchUp(id);
+    for (const id of chats) await catchUp(id, { since: sinceMs });
+    if (lanesOf) {
+      for (const parent of laneParents) {
+        let lanes = [];
+        try {
+          lanes = await lanesOf(parent);
+        } catch (err) {
+          log(`live: lanes of chat ${parent} unreadable: ${err?.message || err}`);
+        }
+        for (const lane of lanes) await catchUpLane(parent, String(lane), sinceMs);
+      }
+    }
   }
 
   // ---------- socket ----------
@@ -247,9 +313,12 @@ export function createLive({
 
   async function onLost() {
     const wasConnected = connected;
+    if (wasConnected) downSince = lastPingAt || now();
     connected = false;
     if (liveness) clearIntervalImpl(liveness);
     liveness = null;
+    if (connectTimer) clearTimeoutImpl(connectTimer);
+    connectTimer = null;
     ws = null;
     if (stopped) return;
     if (!wasConnected) {
@@ -268,10 +337,26 @@ export function createLive({
 
   async function connect() {
     if (stopped) return;
+    if (!WebSocketImpl) throw new Error(NEEDS_NODE22);
     const { url, token } = await session.liveAuth();
+    currentToken = token;
     const socket = new WebSocketImpl(url, [SUBPROTOCOL, token]);
     ws = socket;
     lastPingAt = now();
+    // A socket that never reaches a confirmed subscription is dropped and retried with backoff.
+    connectTimer = setTimeoutImpl(() => {
+      connectTimer = null;
+      if (ws !== socket || connected) return;
+      log("live: no subscription within the connect timeout; retrying");
+      socket.onclose = null;
+      try {
+        socket.close();
+      } catch {
+        // gone already
+      }
+      onLost();
+    }, connectTimeoutMs);
+    connectTimer.unref?.();
     socket.onmessage = (ev) => {
       if (ws !== socket) return;
       let frame;
@@ -296,6 +381,8 @@ export function createLive({
       lastPingAt = now();
     } else if (frame.type === "confirm_subscription") {
       const first = since === null;
+      if (connectTimer) clearTimeoutImpl(connectTimer);
+      connectTimer = null;
       connected = true;
       attempts = 0;
       lastPingAt = now();
@@ -331,14 +418,31 @@ export function createLive({
       }
       // reconnect:true: the close that follows reconnects
     } else if (frame.type === undefined && frame.message !== undefined) {
-      if (isMessageFrame(frame.message)) ingest(frame.message);
+      if (isMessageFrame(frame.message)) {
+        const m = frame.message;
+        m.id ??= m.message_id; // formatted_message names it message_id
+        ingest(m);
+      }
     }
   }
 
   /** Opens the socket (once) and resolves when it is subscribed. Throws the plain error of a stopped connection. */
-  function ensureOpen() {
-    if (fatal) return Promise.reject(fatal);
-    if (connected) return Promise.resolve();
+  async function ensureOpen() {
+    if (!WebSocketImpl) throw new Error(NEEDS_NODE22);
+    if (fatal) {
+      // A fatal stop is lifted by a relink: a different token from the one that was refused.
+      const auth = await session.liveAuth().catch(() => null);
+      if (!auth || auth.token === fatalToken) throw fatal;
+      fatal = null;
+      fatalToken = null;
+      stopped = false;
+      attempts = 0;
+    }
+    if (connected) return;
+    return openNow();
+  }
+
+  function openNow() {
     if (!opening) {
       opening = new Promise((resolve, reject) => {
         openWaiters.push({ resolve, reject });
@@ -363,7 +467,20 @@ export function createLive({
   async function wait({ chat_id = null, after_message_id = null, timeout_s = 120, from = "others", include_work = false } = {}) {
     const chatId = chat_id === null ? null : String(chat_id);
     if (after_message_id !== null && !chatId) throw new Error("after_message_id needs a chat_id.");
-    await ensureOpen();
+    const startedAt = now();
+    // Offline is not a reason to hang past timeout_s: the wait gives up on time and says it was not connected.
+    let gaveUp;
+    const timeout = new Promise((resolve) => {
+      gaveUp = setTimeoutImpl(() => resolve(false), Math.max(0, timeout_s) * 1000);
+    });
+    let opened;
+    try {
+      opened = await Promise.race([ensureOpen().then(() => true), timeout]);
+    } finally {
+      clearTimeoutImpl(gaveUp);
+    }
+    if (!opened) return { messages: [], timed_out: true, connected: false };
+    const remaining = Math.max(0, timeout_s * 1000 - (now() - startedAt));
     if (chatId) await seedChat(chatId);
     const ok = (e) => from === "anyone" || !e.mine;
     if (chatId && after_message_id !== null) {
@@ -373,16 +490,14 @@ export function createLive({
       let ready;
       if (idx >= 0) ready = ring.slice(idx + 1).filter(ok);
       else {
-        const before = new Set(ring.map((e) => e.id));
-        newest.set(chatId, after);
-        await catchUp(chatId);
-        ready = ringOf(chatId).filter((e) => !before.has(e.id) && ok(e));
+        // The anchor is not in the ring (older than it, or never seen): everything the server returns after it counts.
+        ready = (await catchUp(chatId, { last: after })).filter(ok);
       }
       if (ready.length) return { messages: ready.map((e) => e.out), timed_out: false };
     }
     return new Promise((resolve, reject) => {
       const w = { chatId, from, includeWork: include_work, resolve, reject, entries: [], settle: null, timer: null };
-      w.timer = setTimeoutImpl(() => finish(w, true), Math.max(0, timeout_s) * 1000);
+      w.timer = setTimeoutImpl(() => finish(w, true), remaining);
       waiters.add(w);
     });
   }
