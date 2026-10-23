@@ -789,6 +789,14 @@ ignored and `salt_me_wait` still works:
 claude --dangerously-load-development-channels server:salt-me
 ```
 
+**Answering cards.** A card message in `salt_me_read_chat` / `salt_me_wait`
+carries `card: {id, buttons: [{action_id, label, action_type}]}`. `salt_me_tap`
+(`card_id`, `action_id`) taps one as you, like your own tap; it is absent with
+`--read-only`. Salt refuses payments, hand-offs, sign-ups and rule changes from a
+linked computer ("Answer that one on your phone or in the browser."). From a
+shell: `node src/index.mjs --as-me --tap <card_id> <action_id>` prints the answer
+and exits.
+
 **Sending (on by default).** `salt_me_send` (`chat_id`, `text`, optional
 `mentions`) posts immediately as you, with no per-message approval and nothing
 added to the message: no "sent by Claude" marker or footer. Start with

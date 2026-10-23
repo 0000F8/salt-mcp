@@ -14,6 +14,10 @@
 //   --password       the older path: signs in with the Salt password typed into a hidden dialog (or
 //                    SALT_ME_PASSWORD_CMD, which implies --password), unlocks the key locally, saves nothing, and
 //                    signs out on exit, revoking its session.
+//   --tap <card_id> <action_id>
+//                    one-shot: taps that button on a card with this computer's link (the same call as salt_me_tap),
+//                    prints the answer as JSON on stdout and exits. For a running session whose MCP server has not
+//                    restarted yet. Refused with --read-only.
 //   --unlink         cancels this computer's link (DELETE /api/v1/linked_devices/<id> with its own token), removes
 //                    the link file and exits.
 //
@@ -120,6 +124,18 @@ export async function runAsMe({ argv = process.argv.slice(2), env = process.env,
     linkClient,
   });
   const handlers = createMeHandlers({ session, readOnly, host });
+
+  const tapAt = argv.indexOf("--tap");
+  if (tapAt !== -1) {
+    try {
+      console.log(JSON.stringify(await handlers.callTool("salt_me_tap", { card_id: argv[tapAt + 1], action_id: argv[tapAt + 2] })));
+    } catch (err) {
+      console.error(`[salt-mcp] tap failed: ${String(err?.message || err).slice(0, 300)}`);
+      process.exitCode = 1;
+    }
+    return session.signOut();
+  }
+
   const server = buildMeServer(handlers);
   await server.connect(new StdioServerTransport());
 

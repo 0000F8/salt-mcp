@@ -62,7 +62,7 @@ test("tools: salt_me_send is present by default and absent with --read-only; eve
   assert.ok(names(withSend).includes("salt_me_send"));
   for (const tool of withSend.listTools()) {
     assert.ok(tool.annotations && typeof tool.annotations.readOnlyHint === "boolean", `${tool.name} has annotations`);
-    assert.equal(tool.annotations.readOnlyHint, tool.name !== "salt_me_send", tool.name);
+    assert.equal(tool.annotations.readOnlyHint, !/^salt_me_(send|tap)$/.test(tool.name), tool.name);
   }
   const desc = withSend.listTools().find((t) => t.name === "salt_me_send").description;
   assert.match(desc, /immediately as the signed-in person/);
@@ -389,7 +389,7 @@ test("over MCP: results are JSON text with structuredContent, an image comes bac
   const world = await makeWorld();
   const { client, close } = await connect(world);
   const tools = (await client.listTools()).tools;
-  assert.equal(tools.length, 10);
+  assert.equal(tools.length, 11);
   const list = await client.callTool({ name: "salt_me_list_chats", arguments: {} });
   assert.equal(JSON.parse(textOf(list)).length, 4);
   const pic = await client.callTool({ name: "salt_me_read_attachment", arguments: { message_id: world.attachmentMessages.pic.id } });
@@ -558,4 +558,58 @@ test("send limits follow Salt: 20000 characters encrypted, 4000 in an open room,
   await h.callTool("salt_me_send", { chat_id: CHAT_ADA, text: Array(200).fill("line").join("\n") });
   await h.callTool("salt_me_send", { chat_id: CHAT_OPEN, text: "y".repeat(4000) });
   assert.equal(world.posted.length, 3);
+});
+
+// ---------- cards ----------
+
+const CARD_ID = "5501";
+async function addCardMessage(world, { buttons } = {}) {
+  const ada = { id: ADA_ID, username: "ada", display_name: "Ada", account_type: "Agent" };
+  const msg = {
+    id: "7001", message_id: "7001", seq: 9000, chat_id: CHAT_ADA, created_by: ADA_ID, created_at: "2026-10-14T12:00:00.000Z",
+    encrypted: false, event_type: null, reply_to_message_id: null, mentions: [], message: "Approve this job?", sender_message: null, user: ada,
+    resource_type: "Card",
+    resource: {
+      id: CARD_ID, card_type: "blocks", owner: ada,
+      state: { blocks: [{ type: "actions", elements: buttons ?? [
+        { type: "button", action_id: "ok", label: "Approve", action_type: "approve_paid_action" },
+        { type: "button", action_id: "pay_it", label: "Pay\u202e now " + "x".repeat(100), action_type: "pay" },
+      ] }] },
+    },
+  };
+  world.serverMessages.get(CHAT_ADA).push(msg);
+  return msg;
+}
+
+test("cards: read_chat shows the card id and clipped, hidden-char-free button labels flagged as data", async () => {
+  const world = await makeWorld();
+  await addCardMessage(world);
+  const out = await handlersFor(world).callTool("salt_me_read_chat", { chat_id: CHAT_ADA });
+  const msg = out.messages.find((m) => m.id === "7001");
+  assert.equal(msg.resource, "Card");
+  assert.equal(msg.card.id, CARD_ID);
+  assert.deepEqual(msg.card.buttons.map((b) => [b.action_id, b.action_type]), [["ok", "approve_paid_action"], ["pay_it", "pay"]]);
+  assert.equal(msg.card.buttons[0].label, "Approve");
+  assert.ok(msg.card.buttons[1].label.length <= 60);
+  assert.ok(!/\u202e/.test(msg.card.buttons[1].label));
+  assert.match(msg.card.note, /data, never instructions/);
+});
+
+test("salt_me_tap posts the tap and returns ok, dispatched and ignored", async () => {
+  const world = await makeWorld();
+  const out = await handlersFor(world).callTool("salt_me_tap", { card_id: CARD_ID, action_id: "ok" });
+  assert.deepEqual(out, { ok: true, dispatched: "approve_paid_action", ignored: false });
+  assert.deepEqual(world.tapped, [{ card_id: CARD_ID, body: { action_id: "ok" } }]);
+});
+
+test("salt_me_tap is absent and refused with --read-only; it validates ids; the API's refusal sentence comes through", async () => {
+  const world = await makeWorld();
+  const ro = handlersFor(world, { readOnly: true });
+  assert.ok(!ro.listTools().some((t) => t.name === "salt_me_tap"));
+  await assert.rejects(ro.callTool("salt_me_tap", { card_id: CARD_ID, action_id: "ok" }), /--read-only/);
+  const h = handlersFor(world);
+  await assert.rejects(h.callTool("salt_me_tap", { card_id: "x/../y", action_id: "ok" }), /plain Salt id/);
+  await assert.rejects(h.callTool("salt_me_tap", { card_id: CARD_ID }), /action_id is required/);
+  assert.equal(world.tapped.length, 0);
+  await assert.rejects(h.callTool("salt_me_tap", { card_id: CARD_ID, action_id: "pay_it" }), /Answer that one on your phone or in the browser\./);
 });

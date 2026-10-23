@@ -188,6 +188,7 @@ export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase
 
   const requests = [];
   const posted = [];
+  const tapped = [];
   const state = { signIns: 0, signOuts: 0, expireNextRequest: false };
 
   const sessionFor = (chat) => ({ ...chat, joined_at: "2026-01-01T00:00:00Z", request_state: chat.request_state ?? null });
@@ -264,6 +265,14 @@ export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase
       return json({ id: "9001", message_id: "9001", chat_id: body.chat_id });
     }
 
+    m = /^\/api\/v1\/cards\/([^/]+)\/actions$/.exec(path);
+    if (method === "POST" && m) {
+      const body = JSON.parse(init.body);
+      tapped.push({ card_id: m[1], body });
+      if (body.action_id === "pay_it") return json({ error: "Answer that one on your phone or in the browser.", code: "linked_device_restricted" }, 403);
+      return json({ ok: true, dispatched: "approve_paid_action", ignored: false });
+    }
+
     return json({ error: `unrouted ${method} ${path}` }, 404);
   }
 
@@ -283,7 +292,7 @@ export async function makeWorld({ lockMode = "login", scheme = "vault", wrapCase
     },
   });
 
-  return { fetchImpl, requests, posted, state, session, keys, vault, userKey, dek, ids: { me, ada, bot }, files, attachmentMessages, secretCalls, serverMessages, password };
+  return { fetchImpl, requests, posted, tapped, state, session, keys, vault, userKey, dek, ids: { me, ada, bot }, files, attachmentMessages, secretCalls, serverMessages, password };
 }
 
 /** Everything the world would have to keep secret from a model: scanned for in tool output and logs. */
