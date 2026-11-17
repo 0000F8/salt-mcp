@@ -1,6 +1,6 @@
 // Agents in a person's browser, for the LOCAL server only (api-key agent that holds its private key).
 //
-// A person lends their browser to an agent in Salt (a grant on one of their browser clients). Each tool here is one
+// A person grants their browser to an agent in Salt (a grant on one of their browser clients). Each tool here is one
 // step: POST /api/v1/browser/steps {step_id, action, args, browser_client_id}. The browser does it and the result
 // comes back SEALED for this agent's own key (PGP armor; Salt cannot read it), which this process opens with the
 // key it already holds. That is why the hosted keyless catalog does not list these tools: a keyless connection has no
@@ -95,7 +95,7 @@ export const BROWSER_TOOL_METADATA = [
     name: "salt_browser_grants",
     title: "Browser Grants",
     description:
-      "Lists the browsers people have lent this agent (active grants only): which browser, who lent it, the access level (limited, full or read_only) and the sites it may use. " +
+      "Lists the browsers people have granted this agent (active grants only): which browser, who granted it, the access level (limited, full or read_only) and the sites it may use. " +
       "Empty means no one has given this agent a browser; they do that in Salt, under Connections > Browsers.",
     inputSchema: { type: "object", properties: {} },
     annotations: ANN.read,
@@ -128,7 +128,7 @@ export const BROWSER_TOOL_METADATA = [
   named("salt_browser_screenshot", "Screenshot", "Takes a picture of the page and returns it as an image. `full_page`, `ref` (one element) and `rect` {x,y,width,height} need a browser that supports them.", { tab: TAB, full_page: { type: "boolean" }, ref: { type: "string" }, rect: { type: "object" } }, [], ANN.read),
   named("salt_browser_eval", "Run a Script", "Runs JavaScript in the page and returns its JSON value (up to 200 KB). A page whose content security policy refuses scripts answers csp_blocked. Not available on a look-only grant.", { code: { type: "string", description: "The script body; `return` a value." }, args: { description: "JSON passed to the script." }, tab: TAB, frame: { type: "string" } }, ["code"], ANN.act),
   named("salt_browser_handoff", "Hand the Tab to the Person", "Hands the tab to the person when it needs them (a login, CAPTCHA, code or payment). Say what you need in `reason`; they press Done in the tab when finished.", { reason: { type: "string", description: "What they need to do, in a short plain phrase." }, note: { type: "string" }, tab: TAB }, ["reason"], ANN.soft),
-  named("salt_browser_tabs", "List Tabs", "Lists the tabs open in the person's browser that this agent may see (number, window, title, host, address, whether in front or lent).", {}, [], ANN.read),
+  named("salt_browser_tabs", "List Tabs", "Lists the tabs open in the person's browser that this agent may see (number, window, title, host, address, whether in front; read_only when the grant is look-only).", {}, [], ANN.read),
 ];
 
 export const BROWSER_TOOL_NAMES = new Set(BROWSER_TOOL_METADATA.map((m) => m.name));
@@ -184,7 +184,7 @@ export function createBrowserTools({ host, apiKey, decrypt, fetchImpl, waitMs = 
       return String(requested);
     }
     const rows = await grants();
-    if (rows.length === 0) throw new Error("No one has lent this agent a browser. They do that in Salt, under Connections > Browsers.");
+    if (rows.length === 0) throw new Error("No one has granted this agent a browser. They do that in Salt, under Connections > Browsers.");
     const ids = [...new Set(rows.map((g) => g.browser_client_id).filter((v) => v != null).map(String))];
     if (ids.length !== 1) throw new Error(`This agent has grants on ${ids.length} browsers; pass browser_client_id (${ids.join(", ")}). salt_browser_grants lists them.`);
     return ids[0];

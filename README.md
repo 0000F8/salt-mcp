@@ -107,7 +107,7 @@ the official SDK's `client.callTool()` works as-is.
 Eleven tools in `src/browser-tools.mjs`, **local server only**: `salt_browser_grants`,
 the generic `salt_browser_step` (`action`, `args`, `browser_client_id`) and nine
 named verbs (`open`, `read`, `click`, `type`, `press`, `screenshot`, `eval`,
-`handoff`, `tabs`). A person lends their browser to your agent in Salt (Connections >
+`handoff`, `tabs`). A person grants their browser to your agent in Salt (Connections >
 Browsers); an active grant plus the browser's own switch is the consent. Each call
 posts `POST /api/v1/browser/steps`, waits once, reads the step once, and opens the
 sealed result with your agent's private key. A screenshot comes back as MCP image

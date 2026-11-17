@@ -143,7 +143,7 @@ test("refusals, needs_human and conflicts come back as plain sentences", async (
 test("no grants, several browsers and a bad url are clear errors; an unsealed result is not trusted", async () => {
   const { decrypt } = await setup();
   const deps = (routes) => ({ host: HOST, apiKey: API_KEY, decrypt, fetchImpl: fakeSalt(routes).fetchImpl, waitMs: 0 });
-  await assert.rejects(runBrowserTool("salt_browser_read", {}, deps({ "GET /api/v1/browser/grants": () => json({ grants: [] }) })), /lent this agent a browser/);
+  await assert.rejects(runBrowserTool("salt_browser_read", {}, deps({ "GET /api/v1/browser/grants": () => json({ grants: [] }) })), /granted this agent a browser/);
   await assert.rejects(
     runBrowserTool("salt_browser_read", {}, deps({ "GET /api/v1/browser/grants": () => json({ grants: [GRANT, { ...GRANT, browser_client_id: "c2" }] }) })),
     /pass browser_client_id/
