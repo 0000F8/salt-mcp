@@ -5,8 +5,16 @@
 
 /** @param {unknown} result what a tool handler returned (string or JSON value) */
 export function toolResult(result) {
+  if (result instanceof McpImageResult) return { content: result.content };
   const text = typeof result === "string" ? result : JSON.stringify(result ?? null, null, 2);
   const out = { content: [{ type: "text", text }] };
   if (result && typeof result === "object" && !Array.isArray(result)) out.structuredContent = result;
   return out;
+}
+
+/** A tool result that is already MCP content (text plus an image), not JSON to wrap. */
+export class McpImageResult {
+  constructor(content) {
+    this.content = content;
+  }
 }

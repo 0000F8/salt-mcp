@@ -216,6 +216,20 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: true, // revoking an already-revoked share leaves the same state
     openWorldHint: true,
   },
+  browser_grants: {
+    title: "Browser Grants",
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  },
+  browser_step: {
+    title: "Browser Step",
+    readOnlyHint: false,
+    destructiveHint: true, // can click, type and submit in a person's own signed-in browser
+    idempotentHint: false, // each call is a new step (the SDK reuses a step id only for a retry of the same call)
+    openWorldHint: true,
+  },
 };
 
 /**

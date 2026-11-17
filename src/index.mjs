@@ -27,6 +27,7 @@ import { toMcpTools } from "./annotations.mjs";
 import { createApiKeyRequest, toRoomMcpTools, runRoomTool, ROOM_TOOL_NAMES } from "./room-tools.mjs";
 import { MEDIA_TOOL_NAMES, toMediaMcpTools, runMediaTool } from "./media-tools.mjs";
 import { LOCAL_TOOL_NAMES, toLocalMcpTools, createLocalRest, runLocalTool } from "./local-tools.mjs";
+import { BROWSER_TOOL_NAMES, toBrowserMcpTools, runBrowserTool } from "./browser-tools.mjs";
 import { createDecryptor } from "./local-decrypt.mjs";
 import { checkCredentials } from "./startup-check.mjs";
 import { toolResult } from "./tool-result.mjs";
@@ -105,6 +106,10 @@ function withChatIdForPostCard(tool) {
   };
 }
 
+// The SDK carries the same two browser actions, but this server lists them once, as the salt_browser_* tools
+// (which also return a screenshot as an image), so a model never sees two doors to one step.
+const SDK_BROWSER_ACTIONS = new Set(["browser_grants", "browser_step"]);
+
 /**
  * The local server's whole tool surface as two functions, so tests can drive
  * it without stdio. `decrypt` opens messages for salt_read_room (omit it and
@@ -115,15 +120,16 @@ export function createLocalHandlers({ actions, caller, host, decrypt, fetchImpl,
   const roomRequest = createApiKeyRequest({ host, apiKey: caller.apiKey, fetchImpl });
   const rest = createLocalRest({ host, fetchImpl });
   return {
-    toolCount: actions.definitions.length + LOCAL_TOOL_NAMES.size + ROOM_TOOL_NAMES.size + MEDIA_TOOL_NAMES.size + (channel ? channel.tools.length : 0),
+    toolCount: actions.definitions.filter((d) => !SDK_BROWSER_ACTIONS.has(d.name)).length + BROWSER_TOOL_NAMES.size + LOCAL_TOOL_NAMES.size + ROOM_TOOL_NAMES.size + MEDIA_TOOL_NAMES.size + (channel ? channel.tools.length : 0),
     listTools() {
-      const sdkTools = toMcpTools(actions.definitions).map((t) => (t.name === "post_card" ? withChatIdForPostCard(t) : t));
-      return [...sdkTools, ...toLocalMcpTools(), ...toRoomMcpTools({ decrypts: Boolean(decrypt) }), ...toMediaMcpTools({ local: true }), ...(channel ? channel.tools : [])];
+      const sdkTools = toMcpTools(actions.definitions.filter((d) => !SDK_BROWSER_ACTIONS.has(d.name))).map((t) => (t.name === "post_card" ? withChatIdForPostCard(t) : t));
+      return [...sdkTools, ...toLocalMcpTools(), ...toRoomMcpTools({ decrypts: Boolean(decrypt) }), ...toMediaMcpTools({ local: true }), ...toBrowserMcpTools(), ...(channel ? channel.tools : [])];
     },
     async callTool(name, args = {}, extra = {}) {
       if (channel && REPLY_TOOL_NAMES.has(name)) return channel.reply(args);
       if (ROOM_TOOL_NAMES.has(name)) return runRoomTool(name, args, { request: roomRequest, decrypt });
       if (MEDIA_TOOL_NAMES.has(name)) return runMediaTool(name, args, { request: roomRequest, allowPath: true });
+      if (BROWSER_TOOL_NAMES.has(name)) return runBrowserTool(name, args, { host, apiKey: caller.apiKey, decrypt, fetchImpl });
       if (LOCAL_TOOL_NAMES.has(name)) return runLocalTool(name, args, { rest, apiKey: caller.apiKey, ...extra });
       // No chat context in an MCP session -- depth 0, mainChatId null. Actions
       // that require a live chat (delegate_to_agent, hand_off_*, ...) report

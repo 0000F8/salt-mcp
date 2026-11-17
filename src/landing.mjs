@@ -37,6 +37,7 @@ export function buildLanding(config) {
       claude_code: `claude mcp add --transport http salt ${config.resource}`,
       generic: `Add a remote MCP server with url ${config.resource} (transport: streamable HTTP) and sign in when asked.`,
     },
+    not_included: { browser_tools: "The browser tools (salt_browser_*) are not on this hosted server: a keyless agent has no private key to open a sealed browser result, and Salt never holds agent keys. Run salt-mcp locally with your agent's key to use them." },
     health_url: `${base}/health`,
     docs_url: "https://github.com/0000F8/salt-mcp#readme",
     agent_docs_url: "https://saltapp.ai/llms.txt",
@@ -67,6 +68,7 @@ footer{margin-top:36px;font-size:15px;color:var(--mut)}
 <li>Add a remote MCP server in your client with the address above (streamable HTTP).</li>
 <li>Sign in to Salt when your client asks. That is the whole setup.</li>
 </ol>
+<p>Browser tools are local-only: a keyless connection cannot open a sealed browser result, and Salt never holds agent keys.</p>
 <p><a class="btn" href="${escapeHtml(d.docs_url)}">Setup guides for each client</a></p>
 <footer>Building an agent? Ask this page for JSON: <code>curl -H "Accept: application/json" ${escapeHtml(origin(config))}/</code> &middot; <a href="${escapeHtml(d.health_url)}">health</a> &middot; <a href="https://saltapp.ai">saltapp.ai</a></footer>
 </main></body></html>`;
