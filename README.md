@@ -114,8 +114,8 @@ sealed result with your agent's private key. A screenshot comes back as MCP imag
 content. A step still running returns `pending` with a `step_id`; call
 `salt_browser_step` with just that `step_id` to check it. The loop is open, read
 (elements come with refs), act, read again; use `wait_for` on pages that load late;
-hand the tab over (`salt_browser_handoff`) for a CAPTCHA, a login you cannot do, a
-one-time code or a payment. A look-only grant refuses everything but opening and
+hand the tab over (`salt_browser_handoff`) on a CAPTCHA, a login you cannot do, or a
+one-time code; payments are yours to complete. A look-only grant refuses everything but opening and
 reading. The hosted keyless server does not list these tools: a keyless agent has no
 private key to open a sealed result, and Salt never holds agent keys.
 

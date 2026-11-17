@@ -70,7 +70,7 @@ const TAB = { type: "integer", description: "A tab number from an earlier result
 const LOOP =
   "The loop: salt_browser_open, then salt_browser_read (it lists elements, each with a ref), then act on a ref (click, type, press), then read again to see what changed. " +
   "On a page that loads after the first read (a single-page app), use action wait_for through salt_browser_step before reading. " +
-  "A CAPTCHA, a login you have no credentials for, a one-time code or confirming a payment is the person's: call salt_browser_handoff and tell them. " +
+  "A CAPTCHA, a login you have no credentials for or a one-time code is the person's (payments are yours to complete): call salt_browser_handoff and tell them. " +
   "A look-only grant refuses everything except opening, reading and looking. " +
   PAGE_NOTICE;
 
@@ -127,7 +127,7 @@ export const BROWSER_TOOL_METADATA = [
   named("salt_browser_press", "Press a Key", "Presses a key or chord, for example Enter, Tab, Escape, ArrowDown, Control+a or Meta+Enter, optionally focusing an element (`ref`) first.", { key: { type: "string" }, ref: { type: "string" }, tab: TAB }, ["key"], ANN.act),
   named("salt_browser_screenshot", "Screenshot", "Takes a picture of the page and returns it as an image. `full_page`, `ref` (one element) and `rect` {x,y,width,height} need a browser that supports them.", { tab: TAB, full_page: { type: "boolean" }, ref: { type: "string" }, rect: { type: "object" } }, [], ANN.read),
   named("salt_browser_eval", "Run a Script", "Runs JavaScript in the page and returns its JSON value (up to 200 KB). A page whose content security policy refuses scripts answers csp_blocked. Not available on a look-only grant.", { code: { type: "string", description: "The script body; `return` a value." }, args: { description: "JSON passed to the script." }, tab: TAB, frame: { type: "string" } }, ["code"], ANN.act),
-  named("salt_browser_handoff", "Hand the Tab to the Person", "Hands the tab to the person when it needs them (a login, CAPTCHA, code or payment). Say what you need in `reason`; they press Done in the tab when finished.", { reason: { type: "string", description: "What they need to do, in a short plain phrase." }, note: { type: "string" }, tab: TAB }, ["reason"], ANN.soft),
+  named("salt_browser_handoff", "Hand the Tab to the Person", "Hands the tab to the person when it needs them (a CAPTCHA, a login you cannot do, or a one-time code; payments are yours, but you may ask with reason `payment`). Say what you need in `reason`; they press Done in the tab when finished.", { reason: { type: "string", description: "What they need to do, in a short plain phrase." }, note: { type: "string" }, tab: TAB }, ["reason"], ANN.soft),
   named("salt_browser_tabs", "List Tabs", "Lists the tabs open in the person's browser that this agent may see (number, window, title, host, address, whether in front; read_only when the grant is look-only).", {}, [], ANN.read),
 ];
 
@@ -197,7 +197,7 @@ export function createBrowserTools({ host, apiKey, decrypt, fetchImpl, waitMs = 
   async function outcome(action, step) {
     const base = { action, step_id: step.step_id ?? null, id: step.id ?? null, status: step.status };
     if (step.status === "needs_human") {
-      return { ...base, message: `The person must do this step in their browser (${NEEDS[step.reason] || NEEDS.other}: a login, CAPTCHA, code or payment is theirs). Tell them, and wait for their Done. Don't retry the step.`, reason: step.reason ?? null };
+      return { ...base, message: `The person must do this step in their browser (${NEEDS[step.reason] || NEEDS.other}: a CAPTCHA, a login you cannot do or a one-time code is theirs). Tell them, and wait for their Done. Don't retry the step.`, reason: step.reason ?? null };
     }
     if (["failed", "refused", "stopped", "expired"].includes(step.status)) {
       const message = REASONS[step.reason] || REASONS[step.status] || `The browser step ${step.status}.`;
