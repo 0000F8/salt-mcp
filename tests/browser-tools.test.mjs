@@ -50,7 +50,7 @@ test("listed in the local catalog with annotations; hidden from keyless and host
   const actions = createActions({ client: createSaltClient({ host: HOST }), identities, pgpPassphrase: "p", publicWebhookUrl: "", walletMasterKey: "u" });
   const handlers = createLocalHandlers({ actions, caller, host: HOST });
   const tools = handlers.listTools();
-  assert.equal(BROWSER_TOOL_NAMES.size, 11);
+  assert.equal(BROWSER_TOOL_NAMES.size, 15);
   for (const name of BROWSER_TOOL_NAMES) {
     const t = tools.find((x) => x.name === name);
     assert.ok(t, `${name} missing from the local catalog`);
@@ -177,4 +177,42 @@ test("salt_browser_grants lists active grants; a call over MCP returns the image
 
 test("metadata: every named tool's required fields exist in its schema", () => {
   for (const m of BROWSER_TOOL_METADATA) for (const r of m.inputSchema.required || []) assert.ok(m.inputSchema.properties[r], `${m.name} requires ${r}`);
+});
+
+test("the Firefox-reach tools: annotations, step args, and a download returned as an embedded resource", async () => {
+  const meta = Object.fromEntries(BROWSER_TOOL_METADATA.map((m) => [m.name, m]));
+  assert.equal(meta.salt_browser_locate.annotations.readOnlyHint, true, "locate only looks");
+  for (const n of ["salt_browser_route", "salt_browser_download", "salt_browser_cookies"]) assert.equal(meta[n].annotations.readOnlyHint, false, `${n} is not read-only (route/cookies change state, download may save)`);
+  assert.ok(meta.salt_browser_step.inputSchema.properties.action.enum.includes("clipboard"), "the generic step takes clipboard");
+
+  const { decrypt, seal } = await setup();
+  const deps = (salt) => ({ host: HOST, apiKey: API_KEY, decrypt, fetchImpl: salt.fetchImpl, waitMs: 0 });
+  const bytes = Buffer.from("%PDF-fake").toString("base64");
+  const armor = await seal({ url: "https://example.test/a.pdf", mime: "application/pdf", size: 9, data_base64: bytes });
+  const salt = fakeSalt({ "POST /api/v1/browser/steps": () => json({ step: { id: "d1", status: "done", result: armor } }, 201) });
+  const out = await runBrowserTool("salt_browser_download", { browser_client_id: CLIENT, url: "https://example.test/a.pdf" }, deps(salt));
+  const mcp = toolResult(out);
+  const res = mcp.content.find((c) => c.type === "resource").resource;
+  assert.equal(res.mimeType, "application/pdf");
+  assert.equal(Buffer.from(res.blob, "base64").toString(), "%PDF-fake");
+  assert.match(mcp.content[0].text, /"mime": "application\/pdf"/);
+  assert.match(mcp.content[0].text, /"size": 9/);
+  assert.doesNotMatch(mcp.content[0].text, new RegExp(bytes.replace(/[+/=]/g, ".")), "bytes are not duplicated into the text");
+  assert.deepEqual(salt.calls[0].body.args, { url: "https://example.test/a.pdf" });
+  assert.equal(salt.calls[0].body.action, "download");
+
+  const saved = await seal({ url: "https://example.test/a.pdf", saved: true, filename: "a.pdf" });
+  const s2 = fakeSalt({ "POST /api/v1/browser/steps": () => json({ step: { id: "d2", status: "done", result: saved } }, 201) });
+  const out2 = await runBrowserTool("salt_browser_download", { browser_client_id: CLIENT, url: "https://example.test/a.pdf", save: true }, deps(s2));
+  assert.equal(out2.result.saved, true);
+
+  const s3 = fakeSalt({ "POST /api/v1/browser/steps": () => json({ step: { id: "c1", status: "done" } }, 201) });
+  for (const [tool, args, action] of [["salt_browser_locate", { ref: "e1" }, "locate"], ["salt_browser_route", { op: "list" }, "route"], ["salt_browser_cookies", { op: "get", url: "https://example.test/" }, "cookies"]]) {
+    await runBrowserTool(tool, { browser_client_id: CLIENT, ...args }, deps(s3));
+    assert.equal(s3.calls.at(-1).body.action, action);
+    assert.deepEqual(s3.calls.at(-1).body.args, args);
+  }
+  const s4 = fakeSalt({ "POST /api/v1/browser/steps": () => json({ step: { id: "n", status: "refused", reason: "needs_permission" } }, 201) });
+  const np = await runBrowserTool("salt_browser_step", { action: "clipboard", args: { op: "read" }, browser_client_id: CLIENT }, deps(s4));
+  assert.match(np.message, /permission/);
 });

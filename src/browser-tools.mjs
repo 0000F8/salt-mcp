@@ -36,6 +36,7 @@ const REASONS = {
   expired: "The step expired before their browser picked it up.",
   bad_args: "The browser couldn't make sense of that step.",
   not_supported: "This browser can't do that.",
+  needs_permission: "Their browser needs one more permission for that. They turn the Salt switch off and on in the Salt panel to allow it.",
   person_stopped: "They stopped the agent in their browser.",
   switch_off: "They switched the browser off.",
   grant_revoked: "They took back this agent's access to the browser.",
@@ -61,7 +62,7 @@ const CONFLICTS = {
 const ACTIONS = [
   "open", "read", "click", "type", "press", "select", "hover", "drag", "upload", "scroll", "wait_for", "screenshot",
   "screenshot_diff", "console", "eval", "dialog", "network", "emulate", "recording", "demonstrate", "webmcp",
-  "handoff", "tabs", "control",
+  "handoff", "tabs", "control", "locate", "route", "download", "cookies", "clipboard",
 ];
 
 const BROWSER_CLIENT = { type: "string", description: "Which of the person's browsers (from salt_browser_grants). Leave out when this agent has exactly one active grant." };
@@ -106,7 +107,8 @@ export const BROWSER_TOOL_METADATA = [
     description:
       `Runs one step in a person's browser and returns its result. \`action\` is one of: ${ACTIONS.join(", ")}. \`args\` carries that action's arguments ` +
       "(open: url; click: ref; type: ref, text; press: key; select: ref and value or label; hover: ref; drag: ref and to_ref or to {x,y}; upload: ref, files [{name,type,data_base64}]; " +
-      "scroll: direction or ref; wait_for: one of text, url, ref, selector, optional gone and timeout_ms; screenshot: optional full_page, ref, rect; eval: code; dialog: accept, text; handoff: reason, note; " +
+      "scroll: direction or ref; wait_for: one of text, url, ref, selector, optional gone and timeout_ms; screenshot: optional full_page, ref, rect; eval: code, optional world page|isolated (Firefox: isolated runs where a strict page policy blocks the page world); dialog: accept, text, optional mode next|always (Firefox); handoff: reason, note; "
+      + "locate: ref (its screen coordinates); route: op add|remove|list|clear, match, action block|fulfill|redirect|modify; download: url, optional save, filename; cookies: op get|set|remove, url, name; clipboard: op read|write, text; " +
       "every action may name a `tab`). A step still running after a short wait comes back `pending` with a `step_id`: call this tool again with only that `step_id` to check it, once, and don't repeat the step. " +
       LOOP,
     inputSchema: {
@@ -127,6 +129,10 @@ export const BROWSER_TOOL_METADATA = [
   named("salt_browser_press", "Press a Key", "Presses a key or chord, for example Enter, Tab, Escape, ArrowDown, Control+a or Meta+Enter, optionally focusing an element (`ref`) first.", { key: { type: "string" }, ref: { type: "string" }, tab: TAB }, ["key"], ANN.act),
   named("salt_browser_screenshot", "Screenshot", "Takes a picture of the page and returns it as an image. `full_page`, `ref` (one element) and `rect` {x,y,width,height} need a browser that supports them.", { tab: TAB, full_page: { type: "boolean" }, ref: { type: "string" }, rect: { type: "object" } }, [], ANN.read),
   named("salt_browser_eval", "Run a Script", "Runs JavaScript in the page and returns its JSON value (up to 200 KB). A page whose content security policy refuses scripts answers csp_blocked. Not available on a look-only grant.", { code: { type: "string", description: "The script body; `return` a value." }, args: { description: "JSON passed to the script." }, tab: TAB, frame: { type: "string" } }, ["code"], ANN.act),
+  named("salt_browser_locate", "Locate an Element on the Screen", "Returns where one element (by its ref from salt_browser_read) is on the person's screen: screen x, y, width, height, the viewport, the device pixel ratio and whether the tab is in front. Use it when a page wants a real click or real keys (a site that ignores scripted clicks) and you also hold a device grant, so you can click that spot through Salt Device. Only looks; changes nothing.", { ref: { type: "string" }, tab: TAB }, ["ref"], ANN.read),
+  named("salt_browser_route", "Route Network Requests", "Controls the page's network for this tab (Firefox): op `add` a rule (`match` is a URL substring or a * glob; `action` block, fulfill with `body`/`body_base64`/`headers`, redirect to `redirect_url`, or modify a text response with `replace` [{find, with}]), `list` the rules with their hit counts, `remove` one by `id`, or `clear`. Use it to stop a tracker or ad, stub an API, or rewrite a response while you test. Rules are yours alone, per tab, at most 50, and end when the person stops the agent.", { op: { type: "string", enum: ["add", "remove", "list", "clear"] }, id: { type: "string" }, match: { type: "string" }, action: { type: "string", enum: ["block", "fulfill", "redirect", "modify"] }, status: { type: "integer" }, headers: { type: "object" }, body: { type: "string" }, body_base64: { type: "string" }, redirect_url: { type: "string" }, replace: { type: "array", items: { type: "object", properties: { find: { type: "string" }, with: { type: "string" } }, required: ["find", "with"] } }, tab: TAB }, ["op"], ANN.act),
+  named("salt_browser_download", "Download a File", "Fetches a file with the person's browser, using the cookies and logins of the tab's session, and returns the bytes to you as an embedded MCP resource (a blob with its mime type; text says the mime and size). Up to 8 MB. The address must be a site this agent may use. With `save` true the browser saves it into the person's Downloads instead (needs the downloads permission) and nothing comes back.", { url: { type: "string", description: "A full http:// or https:// address." }, save: { type: "boolean" }, filename: { type: "string" }, tab: TAB }, ["url"], ANN.soft),
+  named("salt_browser_cookies", "Cookies", "Reads, sets or removes cookies for one address the agent may use (`op` get, set or remove; `url`, and `name` for set/remove with `value`, `path`, `secure`, `http_only`, `same_site`, `expires`). Values are shown in full. It uses the agent's own cookie jar when the grant gives it its own logins, otherwise the person's. Never for Salt's own domains.", { op: { type: "string", enum: ["get", "set", "remove"] }, url: { type: "string" }, name: { type: "string" }, value: { type: "string" }, path: { type: "string" }, secure: { type: "boolean" }, http_only: { type: "boolean" }, same_site: { type: "string" }, expires: { type: "number" }, tab: TAB }, ["op", "url"], ANN.act),
   named("salt_browser_handoff", "Hand the Tab to the Person", "Hands the tab to the person when it needs them (a CAPTCHA, a login you cannot do, or a one-time code; payments are yours, but you may ask with reason `payment`). Say what you need in `reason`; they press Done in the tab when finished.", { reason: { type: "string", description: "What they need to do, in a short plain phrase." }, note: { type: "string" }, tab: TAB }, ["reason"], ANN.soft),
   named("salt_browser_tabs", "List Tabs", "Lists the tabs open in the person's browser that this agent may see (number, window, title, host, address, whether in front; read_only when the grant is look-only).", {}, [], ANN.read),
 ];
@@ -137,7 +143,8 @@ export const BROWSER_TOOL_NAMES = new Set(BROWSER_TOOL_METADATA.map((m) => m.nam
 const NAMED_ACTION = {
   salt_browser_open: "open", salt_browser_read: "read", salt_browser_click: "click", salt_browser_type: "type",
   salt_browser_press: "press", salt_browser_screenshot: "screenshot", salt_browser_eval: "eval",
-  salt_browser_handoff: "handoff", salt_browser_tabs: "tabs",
+  salt_browser_handoff: "handoff", salt_browser_tabs: "tabs", salt_browser_locate: "locate", salt_browser_route: "route",
+  salt_browser_download: "download", salt_browser_cookies: "cookies",
 };
 
 /** Plain MCP Tool objects for the local catalog. */
@@ -230,6 +237,19 @@ export function createBrowserTools({ host, apiKey, decrypt, fetchImpl, waitMs = 
         ]);
       }
     }
+    if (action === "download" && !result?.saved) {
+      // A file is MCP embedded-resource content (a blob with a mime type), the nearest fit to a picture's image content.
+      const data = result?.data_base64 ?? result?.file?.base64;
+      if (typeof data === "string" && data) {
+        const mime = result.mime ?? result.file?.mime ?? "application/octet-stream";
+        const size = result.size ?? result.file?.size ?? Buffer.from(data, "base64").length;
+        const { data_base64, file, ...rest } = result;
+        return new McpImageResult([
+          { type: "text", text: JSON.stringify({ ...base, notice: PAGE_NOTICE, result: { ...rest, mime, size } }, null, 2) },
+          { type: "resource", resource: { uri: String(result.url || "download:file"), mimeType: mime, blob: data } },
+        ]);
+      }
+    }
     return { ...base, notice: PAGE_NOTICE, result };
   }
 
@@ -295,7 +315,7 @@ export function createBrowserTools({ host, apiKey, decrypt, fetchImpl, waitMs = 
   };
 }
 
-/** Runs one browser tool by name. A picture comes back as an McpImageResult (text + MCP image content). */
+/** Runs one browser tool by name. A picture or a downloaded file comes back as an McpImageResult (text + MCP image or resource content). */
 export async function runBrowserTool(name, args, deps) {
   if (!BROWSER_TOOL_NAMES.has(name)) throw new Error(`Tool "${name}" is not a browser tool.`);
   const tools = createBrowserTools(deps);
