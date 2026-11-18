@@ -59,7 +59,8 @@ test("no stale annotation entries for tools the SDK no longer defines", () => {
   const liveNames = new Set(definitions.map((d) => d.name));
   // browser_grants / browser_step land in salt-agent-sdk 0.37.0 (browse-parity wave); annotated here ahead of the SDK
   // bump so the two merge in either order. Delete this allowance once package.json requires that SDK.
-  const ahead = new Set(["browser_grants", "browser_step"]);
+  // show_screen lands in salt-agent-sdk 0.38.0 (the screen card), same arrangement.
+  const ahead = new Set(["browser_grants", "browser_step", "show_screen"]);
   const stale = Object.keys(TOOL_ANNOTATIONS).filter((name) => !liveNames.has(name) && !ahead.has(name));
   assert.deepEqual(stale, [], `Annotated tool(s) no longer in the SDK's action catalog: ${stale.join(", ")}`);
 });

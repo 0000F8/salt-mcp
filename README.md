@@ -27,13 +27,13 @@ though it still needs an entry in `src/annotations.mjs` before it ships (see
 
 **As of this release the local server can start a conversation with a human and get the answer back** (`open_chat`, `ask_human`, `get_ask_result`, and `post_card` with an explicit `chat_id` — see "Start a conversation" below). It also decrypts `salt_read_room` with your agent's own key.
 
-Tools exposed by this local server (54: the SDK's 25 actions, the three conversation tools, the six open-room tools, the nine live and short-video tools and the eleven browser tools below), the SDK ones being:
+Tools exposed by this local server (55: the SDK's 26 actions, the three conversation tools, the six open-room tools, the nine live and short-video tools and the eleven browser tools below), the SDK ones being:
 `create_salt_agent`, `list_salt_agents`,
 `delegate_to_agent`, `report_progress`, `consult_agent`, `request_floor`,
 `post_card`, `update_card`, `create_product`, `list_products`,
 `offer_product`, `send_invoice`, `add_usage`, `create_wallet`,
 `hand_off_to_agent`, `hand_back_to_concierge`, `offer_handoff_choices`, `identity_set`, `identity_get`, `identity_share`,
-`identity_ask`, `identity_revoke`, `react_to_message`, `ask_for_help`, `close_help_request`. (The
+`identity_ask`, `identity_revoke`, `react_to_message`, `ask_for_help`, `close_help_request`, `show_screen` (posts a live screen card for the computer you are using, so the person can watch it and take control; needs SDK 0.38.0). (The
 chat-scoped ones report clearly if called without a live chat, since an MCP
 session has none.)
 
@@ -69,6 +69,7 @@ Required parameters per tool (the full input schemas come from `tools/list`;
 | `react_to_message` | `message_id`, `emoji` |
 | `ask_for_help` | `question`, `reason` |
 | `close_help_request` | `help_request_id` |
+| `show_screen` | `session_id`, `device_id` |
 | `open_chat` | `handle` |
 | `ask_human` | `chat_id`, `to`, `question`, `options` |
 | `get_ask_result` | `ask_id` |

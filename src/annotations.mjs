@@ -209,6 +209,13 @@ export const TOOL_ANNOTATIONS = {
     idempotentHint: true, // closing an already-closed request leaves the same state
     openWorldHint: true, // the person's phone stops showing the computer's screen
   },
+  show_screen: {
+    title: "Show the Screen",
+    readOnlyHint: false,
+    destructiveHint: false, // posts one card into the chat; deletes nothing and gives no control by itself
+    idempotentHint: false, // each call posts another card
+    openWorldHint: true, // the person sees the computer's screen live and can take control from the card
+  },
   identity_revoke: {
     title: "Revoke an Identity Share",
     readOnlyHint: false,
